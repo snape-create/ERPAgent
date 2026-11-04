@@ -72,7 +72,16 @@ async def stream_chat_response(
     # 加载已有消息（恢复场景）或初始化
     if resume_data:
         display_messages = await agent_loader.get_display_messages(thread_id)
-        current_input = Command(resume=resume_data)
+        # 把“已人工审批”作为可信状态传给下游评审器，
+        # 否则审批后的评审只看到工具执行，会误判为“未经过人工审批”。
+        decisions = resume_data.get("decisions", []) if isinstance(resume_data, dict) else []
+        approved = any(
+            isinstance(d, dict) and d.get("type") == "approve" for d in decisions
+        )
+        current_input = Command(
+            resume=resume_data,
+            update={"_human_approved": approved},
+        )
     else:
         display_messages = await agent_loader.get_display_messages(thread_id)
         display_messages.append({
@@ -328,7 +337,23 @@ async def stream_chat_response(
                     continue
 
                 # AIMessage 纯文本 → token 事件
-                if content and isinstance(content, str) and content.strip():
+                # 只把模型（AI）的文本当作回答；跳过 Human/System 注入消息
+                # （例如 rubric 评审器注入的英文修订反馈，绝不能展示给用户）。
+                src_name = getattr(token, "name", None)
+                extra = getattr(token, "additional_kwargs", {}) or {}
+                is_internal = (
+                    src_name == "rubric_grader"
+                    or extra.get("lc_source") == "rubric_grader"
+                )
+                is_ai_text = token_type in ("ai", "AIMessageChunk")
+
+                if (
+                    is_ai_text
+                    and not is_internal
+                    and content
+                    and isinstance(content, str)
+                    and content.strip()
+                ):
                     # 首次收到 token 时结束 thinking
                     if not thinking_emitted:
                         yield sse_event("thinking", {"status": "end"})

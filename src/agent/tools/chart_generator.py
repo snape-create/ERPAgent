@@ -38,12 +38,24 @@ import json
 import sys
 import os
 
-for font in ['SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', 'DejaVu Sans']:
-    try:
-        plt.rcParams['font.sans-serif'] = [font]
-        break
-    except:
-        continue
+from matplotlib import font_manager
+
+# 注意：给 rcParams['font.sans-serif'] 赋任何字符串都不会抛异常，
+# 所以不能用 try/except 判断字体是否存在，否则会永远选中第一个（通常是
+# 不存在的 SimHei），matplotlib 静默回退到 DejaVu Sans，中文全变方块。
+_available = {f.name for f in font_manager.fontManager.ttflist}
+_cjk_fonts = [
+    'WenQuanYi Micro Hei',   # 沙箱镜像 Debian 环境
+    'Noto Sans CJK SC',
+    'Microsoft YaHei',       # Windows 本机
+    'PingFang SC',           # macOS 本机
+    'SimHei',
+]
+_selected = next((f for f in _cjk_fonts if f in _available), None)
+if _selected:
+    plt.rcParams['font.sans-serif'] = [_selected, 'DejaVu Sans']
+else:
+    print('WARNING: 未找到中文字体，图表中的中文将显示为方块', file=sys.stderr)
 plt.rcParams['axes.unicode_minus'] = False
 
 params_path = sys.argv[1]
@@ -283,8 +295,13 @@ def generate_chart(
         sandbox.write_file(params_path, json.dumps(params, ensure_ascii=False))
         sandbox.write_file(script_path, CHART_SCRIPT)
 
-        # 安装依赖（仅首次，后续复用缓存）
-        sandbox.execute("pip install -q matplotlib numpy 2>/dev/null || true", timeout=60)
+        # 镜像已预装则直接跳过；仅在缺失时尝试安装。
+        # 注意不要接管道：`| tail` 会把失败 exit code 吞成 0，导致问题被静默掩盖。
+        sandbox.execute(
+            "python -c 'import matplotlib, numpy' 2>/dev/null || "
+            "pip install -q --no-cache-dir matplotlib numpy",
+            timeout=180,
+        )
 
         # 在沙箱内执行图表生成
         result = sandbox.execute(f"python {script_path} {params_path}", timeout=30)

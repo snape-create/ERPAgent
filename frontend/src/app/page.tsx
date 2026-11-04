@@ -14,14 +14,18 @@ export default function Home() {
   const wasStreaming = useRef(false);
 
   // 聊天结束后自动刷新历史列表
+  // 依赖 history.refresh（稳定）而不是整个 history 对象（每次渲染都是新对象，
+  // 否则会导致 effect 每次渲染重复执行、疯狂请求 /api/history）。
+  const refreshHistory = history.refresh;
   useEffect(() => {
     if (wasStreaming.current && !chat.streaming) {
+      wasStreaming.current = false;
       // 延迟 500ms 等待后端保存完成
-      const timer = setTimeout(() => history.refresh(), 500);
+      const timer = setTimeout(() => refreshHistory(), 500);
       return () => clearTimeout(timer);
     }
     wasStreaming.current = chat.streaming;
-  }, [chat.streaming, history]);
+  }, [chat.streaming, refreshHistory]);
 
   const handleSelectThread = useCallback(
     async (threadId: string) => {

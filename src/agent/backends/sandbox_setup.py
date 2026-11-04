@@ -131,9 +131,16 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
         host_config_kwargs["cap_add"] = ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE"]
 
     # seccomp 安全策略
+    # 内联策略内容而非传路径：Docker Desktop 的 daemon 跑在独立的
+    # docker-desktop 发行版里，读不到宿主机 /home 下的文件，传路径会被当成
+    # JSON 解析并以 "Decoding seccomp profile failed" 失败，整层防护静默降级。
     security_opts = []
     if seccomp_profile:
-        security_opts.append(f"seccomp={seccomp_path}")
+        try:
+            compact = json.dumps(json.loads(seccomp_profile), separators=(",", ":"))
+            security_opts.append(f"seccomp={compact}")
+        except json.JSONDecodeError as e:
+            sandbox_logger.warning(f"Invalid seccomp profile, skipping: {e}")
     security_opts.append("no-new-privileges:true")
     host_config_kwargs["security_opt"] = security_opts
 

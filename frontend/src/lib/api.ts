@@ -40,7 +40,7 @@ export async function resumeChat(
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(request),
+      body: JSON.stringify({ resume: request.resume_data }),
       signal,
     }
   );

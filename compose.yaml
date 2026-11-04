@@ -1,0 +1,38 @@
+name: erp-agent
+
+services:
+  mongo:
+    image: mongo:latest
+    container_name: ERP_mongo
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: root123
+      MONGO_INITDB_DATABASE: erp_agent
+    volumes:
+      - mongo-data:/data/db
+
+  postgres:
+    image: postgres:15
+    container_name: ERP_pg
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+      POSTGRES_DB: erp_agent
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+
+  sandbox:
+    profiles: ["sandbox"]
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.sandbox
+    image: erp-agent-sandbox:latest
+    command: ["true"]
+
+volumes:
+  mongo-data:
+  pg-data:

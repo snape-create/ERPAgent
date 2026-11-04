@@ -1,10 +1,10 @@
 "use client";
 
-import ReactMarkdown from "react-markdown";
 import { Bot, User } from "lucide-react";
 import { ChatMessage } from "@/lib/types";
 import ToolCallDisplay from "./ToolCallDisplay";
 import StreamingText from "./StreamingText";
+import Markdown from "./Markdown";
 
 interface Props {
   message: ChatMessage;
@@ -30,10 +30,10 @@ export default function MessageBubble({
       )}
 
       <div
-        className={`max-w-[75%] rounded-2xl px-4 py-3 ${
+        className={`min-w-0 rounded-2xl px-4 py-3 ${
           isUser
-            ? "bg-[#2563EB] text-white rounded-br-md"
-            : "bg-white border border-gray-200 text-gray-800 rounded-bl-md shadow-sm"
+            ? "max-w-[75%] bg-[#2563EB] text-white rounded-br-md"
+            : "max-w-[92%] bg-white border border-gray-200 text-gray-800 rounded-bl-md shadow-sm"
         }`}
       >
         {/* 工具调用展示 */}
@@ -47,16 +47,16 @@ export default function MessageBubble({
 
         {/* 消息内容 */}
         {isUser ? (
-          <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+          <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
         ) : isStreaming && !message.content ? (
           <StreamingText text="" />
         ) : isStreaming ? (
           <div className="text-sm markdown-body">
-            <StreamingText text={message.content} />
+            <StreamingText text={message.content} markdown />
           </div>
         ) : (
           <div className="text-sm markdown-body">
-            <ReactMarkdown>{message.content}</ReactMarkdown>
+            <Markdown>{message.content}</Markdown>
           </div>
         )}
 

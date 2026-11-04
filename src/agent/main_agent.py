@@ -74,14 +74,24 @@ def _upload_project_to_sandbox(sandbox) -> bool:
 
         # 仅使用 BaseSandbox 的公开协议上传；这样 SandboxBackendProxy 热替换
         # 底层容器后，项目上传仍能工作，且不会依赖 Docker 私有 _container。
-        archive_path = "/tmp/erp-agent-project.tar.gz"
+        #
+        # 必须落在 /workspace（显式挂载的 tmpfs）而不是 /tmp：
+        # 容器以 read_only 启动，Docker 的 put_archive 在只读 rootfs 上会直接
+        # 拒绝请求（"container rootfs is marked read-only"），即使 /tmp 本身
+        # 是 tmpfs 可写也无法绕过，因为这是 daemon 层的检查。
+        archive_path = "/workspace/.erp-agent-project.tar.gz"
         responses = sandbox.upload_files([(archive_path, data)])
         errors = [getattr(item, "error", None) for item in responses]
         if not responses or any(errors):
             raise RuntimeError(f"archive upload failed: {errors or 'no response'}")
 
+        # --no-same-owner/--no-same-permissions 不能省：
+        # 容器以 root 运行时 tar 默认按归档还原权限并 chmod，而 /workspace 是
+        # 挂载了 nosuid,nodev 的 tmpfs，chmod 会被拒（"Cannot change mode"），
+        # tar 因此以 exit 2 结束，尽管文件其实都解压成功了。
         unpack = sandbox.execute(
-            f"tar -xzf '{archive_path}' -C '{remote_dir}' && rm -f '{archive_path}'"
+            f"tar -xzf '{archive_path}' -C '{remote_dir}' "
+            f"--no-same-owner --no-same-permissions && rm -f '{archive_path}'"
         )
         if unpack.exit_code != 0:
             raise RuntimeError(f"archive extraction failed: {unpack.output}")
@@ -380,12 +390,16 @@ def create_main_agent(
     ]
 
     # ===== 6. 构建系统提示词 =====
-    system_prompt = MAIN_SYSTEM_PROMPT.format(
-        user_id=user_context.user_id,
-        username=user_context.username,
-        preferences="以本次动态加载的记忆为准",
-        warm_memory=WARM_MEMORY_SLOT,
-    )
+    # 用逐项替换而不是 str.format：提示词里可能包含 LaTeX 花括号（如 \sqrt{d_k}），
+    # str.format 会把 {d_k} 误当成占位符并抛 KeyError。
+    system_prompt = MAIN_SYSTEM_PROMPT
+    for _key, _val in (
+        ("user_id", user_context.user_id),
+        ("username", user_context.username),
+        ("preferences", "以本次动态加载的记忆为准"),
+        ("warm_memory", WARM_MEMORY_SLOT),
+    ):
+        system_prompt = system_prompt.replace("{" + _key + "}", str(_val))
     if DEFAULT_MEMORY_CONFIG.memory_tools_enabled:
         system_prompt += MEMORY_USAGE_PROMPT
     # 注入子Agent委派上下文协议

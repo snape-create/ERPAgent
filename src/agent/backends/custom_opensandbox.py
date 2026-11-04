@@ -6,8 +6,10 @@ Docker 沙箱后端
 import docker
 import base64
 import io
+import os
 import tarfile
 import json
+import uuid
 from typing import Optional
 
 from deepagents.backends.sandbox import (
@@ -369,8 +371,50 @@ class CustomOpenSandbox(BaseSandbox):
         except Exception as e:
             return f"Download failed: {e}"
 
+    def _write_bytes_via_exec(self, path: str, content: bytes) -> None:
+        """用 exec + base64 分块写入文件。
+
+        容器以 ``read_only`` 启动时，Docker daemon 会拒绝所有 ``put_archive``
+        请求（"container rootfs is marked read-only"），即使目标是 /workspace
+        这类 tmpfs 挂载点也一样 —— 这是 daemon 层的全局检查，不看具体路径。
+        而 ``docker exec`` 不受此限制，tmpfs 挂载点本身可写。
+
+        命令行参数上限约 128KB，这里按 60KB 分块，单块只含 base64 字符
+        （A-Za-z0-9+/=），无需额外转义。
+        """
+        b64 = base64.b64encode(content).decode("ascii")
+        tmp = f"/tmp/.upload-{uuid.uuid4().hex[:8]}.b64"
+        chunk_size = 60000
+
+        try:
+            resp = self.execute(f"rm -f {tmp}")
+            if resp.exit_code != 0:
+                raise RuntimeError(f"清理临时文件失败: {resp.output[:200]}")
+
+            for start in range(0, len(b64), chunk_size):
+                part = b64[start:start + chunk_size]
+                resp = self.execute(f"printf '%s' '{part}' >> {tmp}")
+                if resp.exit_code != 0:
+                    raise RuntimeError(
+                        f"分块写入失败（offset={start}）: {resp.output[:200]}"
+                    )
+
+            dir_name = os.path.dirname(path) or "/"
+            resp = self.execute(
+                f"mkdir -p '{dir_name}' && "
+                f"base64 -d {tmp} > '{path}' && rm -f {tmp}"
+            )
+            if resp.exit_code != 0:
+                raise RuntimeError(f"base64 解码落盘失败: {resp.output[:200]}")
+        except Exception:
+            self.execute(f"rm -f {tmp}")
+            raise
+
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
-        """上传文件到容器（tar 流方式）"""
+        """上传文件到容器。
+
+        优先用 Docker 原生 tar 流（快）；容器只读时回退到 exec + base64。
+        """
         results = []
         for path, content in files:
             try:
@@ -384,7 +428,15 @@ class CustomOpenSandbox(BaseSandbox):
                     tar.addfile(info, io.BytesIO(content))
                 tar_stream.seek(0)
 
-                self._container.put_archive(dir_name, tar_stream.read())
+                try:
+                    self._container.put_archive(dir_name, tar_stream.read())
+                except Exception as docker_err:
+                    sandbox_logger.debug(
+                        f"put_archive rejected ({docker_err}), "
+                        f"falling back to exec+base64 for {path}"
+                    )
+                    self._write_bytes_via_exec(path, content)
+
                 results.append(FileUploadResponse(path=path, error=None))
             except Exception as e:
                 results.append(FileUploadResponse(path=path, error=str(e)))

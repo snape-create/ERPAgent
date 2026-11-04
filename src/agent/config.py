@@ -37,11 +37,26 @@ def get_llm(*, thinking: bool = True, timeout: float | None = None,
             reasoning_effort=LLM_REASONING_EFFORT,
             extra_body={"thinking": {"type": "enabled"}},
         )
-    return ChatDeepSeek(
+    model = ChatDeepSeek(
         **common_kwargs,
         temperature=LLM_TEMPERATURE,
         extra_body={"thinking": {"type": "disabled"}},
     )
+
+    # DeepSeek 的 response_format 只支持 {"type": "json_object"}，不支持
+    # json_schema。但 LangChain 内置的模型 profile 把 structured_output 标为
+    # True，导致 create_agent / with_structured_output 选择 ProviderStrategy
+    # 并发送 json_schema，服务端直接返回 400：
+    #   "This response_format type is unavailable now"
+    # 评审器（RubricMiddleware grader）因此全量失败。
+    #
+    # 关掉该能力声明后，LangChain 回退到 ToolStrategy（function calling），
+    # 这是 DeepSeek 支持的路径。profile 是实例级 dict，修改不影响其他实例。
+    profile = getattr(model, "profile", None)
+    if isinstance(profile, dict):
+        profile["structured_output"] = False
+
+    return model
 
 
 # ============ MongoDB 配置 ============
@@ -50,7 +65,17 @@ MONGODB_DB_NAME = get_env("MONGODB_DB_NAME", "erp_agent")
 
 # ============ MCP Server 配置 ============
 MCP_SERVER_URL = get_env("MCP_SERVER_URL", "http://localhost:9000")
-MCP_SSE_URL = f"{MCP_SERVER_URL}/sse"
+# 是否把 MCP 工具内嵌到 FastAPI 进程直接加载（默认 true，无需单独启动 MCP Server）
+MCP_USE_EMBEDDED = get_env("MCP_USE_EMBEDDED", "true").strip().lower() in ("1", "true", "yes", "on")
+# 独立 MCP Server 的传输方式：streamable-http（默认）或 sse（旧版）
+MCP_TRANSPORT = get_env("MCP_TRANSPORT", "streamable-http").strip().lower()
+# 传输端点：streamable-http 默认 /mcp，sse 默认 /sse
+MCP_PATH = get_env(
+    "MCP_PATH", "/sse" if MCP_TRANSPORT == "sse" else "/mcp"
+)
+MCP_URL = f"{MCP_SERVER_URL}{MCP_PATH}"
+# 兼容旧名称
+MCP_SSE_URL = MCP_URL
 
 # ============ 沙箱配置 ============
 SANDBOX_IMAGE = get_env("SANDBOX_IMAGE", "python:3.11-slim")#Docker 镜像名称，具体是 Python 3.11 的 slim（精简）版本

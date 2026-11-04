@@ -122,7 +122,7 @@ TYPESAFE_MODEL=jev-1.13.0
 | **审查路由** | DeepSeek / JEV 可配置切换 | 模糊请求前置判断；JEV 使用独立 TypeSafe Key |
 | **可观测性** | Langfuse（可选，默认关闭） | 元数据追踪、Token 用量与验收评分；不采集对话正文 |
 | **Agent 框架** | DeepAgent + LangGraph | 状态图引擎，支持中断/恢复/子Agent |
-| **MCP 协议** | FastMCP + SSE | Agent ↔ ERP 的工具桥接层 |
+| **MCP 协议** | FastMCP + Streamable HTTP | Agent ↔ ERP 的工具桥接层（默认进程内加载） |
 | **Web 框架** | FastAPI + Uvicorn | SSE 流式响应 |
 | **前端** | Next.js 16 + React 19 + TailwindCSS 4 | 流式对话 UI + 中断交互 |
 | **数据库** | MongoDB (Motor/Pymongo) | 会话/消息/Store 持久化 |
@@ -154,14 +154,15 @@ TYPESAFE_MODEL=jev-1.13.0
 │  │          │ │ (Docker+Store)│ │ 框架内置)    │ │ order      │ │
 │  └──────────┘ └───────────────┘ └─────────────┘ └────────────┘ │
 │  ┌─────────────────────────────────────────────────────────────┐│
-│  │ Tools: 23 MCP + 12 Custom = 35 个显式工具（默认）             ││
+│  │ Tools: 23 ERP + 12 Custom = 35 个显式工具（默认）             ││
+│  │（23 个 ERP 工具默认进程内加载；可切回独立 MCP Server）          ││
 │  │ chart(26种) + web_search + web_fetch + install_skill         ││
 │  │ + hitl_tools + download_sandbox_file + document_generator    ││
 │  └─────────────────────────────────────────────────────────────┘│
 └────────────────────────────┬────────────────────────────────────┘
-                             │ MCP (SSE)
+                             │ MCP (Streamable HTTP，可选)
 ┌────────────────────────────▼────────────────────────────────────┐
-│              MCP Server (FastMCP :9000)                           │
+│         MCP Server (FastMCP :9000，可选独立部署)                   │
 │   suppliers(5) + parts(5) + orders(7) + inventory(6) = 23 tools │
 └────────────────────────────┬────────────────────────────────────┘
                              │ HTTP REST
@@ -423,7 +424,11 @@ MONGODB_URI=mongodb://localhost:27017
 # 若没有自己的 ERP 服务，可先保留占位地址，联网搜索和基础对话仍可启动
 ERP_BASE_URL=http://localhost:8081
 
-# MCP Server 地址（本地）
+# MCP 工具默认内嵌到后端进程直接加载（无需单独启动 MCP Server）
+# 如需改用独立 MCP Server（Streamable HTTP 模式），设为 false 并启动 src.mcp_server.server_main
+MCP_USE_EMBEDDED=true
+
+# MCP Server 地址（仅在 MCP_USE_EMBEDDED=false 时生效）
 MCP_SERVER_URL=http://localhost:9000
 
 # 沙箱 Docker 镜像
@@ -450,19 +455,23 @@ docker run -d \
   sleep infinity
 ```
 
-### 5. 启动 MCP Server（端口 9000）
+### 5. 启动 ERP 后端（端口 8081）
+
+仓库自带一个本地 Mock ERP（FastAPI + PostgreSQL），实现 Agent 需要的 23 个业务接口并内置示例数据：
 
 ```bash
-python -m src.mcp_server.server_main
+# 确保 PostgreSQL 已启动（compose.yaml 里的 postgres / ERP_pg）
+docker compose up -d postgres
+
+# 启动 ERP 后端
+python -m src.erp_service.main
 ```
 
-看到以下输出表示成功：
-```
-🚀 Starting MCP Server on 0.0.0.0:9000 (SSE transport)
-Uvicorn running on http://0.0.0.0:9000
-```
+输出 `Uvicorn running on http://0.0.0.0:8081` 即成功。首次启动会自动建表并灌入摩托车零部件示例数据。
 
-### 6. 启动后端 API（端口 8000）
+> 已有真实 ERP 时，无需启动它，直接改 .env 的 `ERP_BASE_URL` 指向真实服务即可。
+
+### 6. 启动后端 API（端口 8000，已内嵌 MCP 工具）
 
 ```bash
 python -m src.api_view.web_main
@@ -474,6 +483,11 @@ AgentLoader initialized
 Starting ERP Agent Web Server...
 Uvicorn running on http://0.0.0.0:8000
 ```
+
+> 23 个 ERP MCP 工具现在默认**进程内直接加载**，无需单独启动 MCP Server。
+> 如需保持独立 MCP Server(:9000，Streamable HTTP)方式：先启动
+> `python -m src.mcp_server.server_main`，并在 .env 设 `MCP_USE_EMBEDDED=false`。
+> 如需用旧的 SSE 协议：再设 `MCP_TRANSPORT=sse`。
 
 ### 7. 启动前端（端口 3000）
 
@@ -491,10 +505,12 @@ npm run dev
 ## 启动顺序总结
 
 ```
-MongoDB → Docker沙箱 → MCP Server(:9000) → Backend API(:8000) → Frontend(:3000)
+MongoDB → PostgreSQL/ERP后端(:8081) → Backend API(:8000，已内嵌 MCP 工具) → Frontend(:3000)
 ```
 
-> 注意：MCP Server 必须在 Backend API 之前启动，因为 Agent 初始化时会连接 MCP Server 加载 23 个 ERP 工具。
+> 没有真实 ERP 时用仓库自带的 Mock（`python -m src.erp_service.main`）；有真实 ERP 时改 `ERP_BASE_URL` 即可，无需启动 Mock。
+
+> MCP 工具已默认内嵌到 Backend API 进程，无需再单独启动 MCP Server(:9000)。
 
 ---
 
@@ -564,7 +580,7 @@ WARM 摘要在每次模型调用前刷新，最多 4000 字符；更早的任务
 
 新增覆盖单价查询、金额计算、库存缺口、缺字段追问、工具审批通过与拒绝的 **6 类、18 条业务用例**。固定模拟 ERP 数据，接入真实 DeepSeek 模型和项目 Agent 组装，以结构化答案、工具调用及订单状态验收。冻结后的首轮正式评测通过 **18/18**，3 条审批拒绝用例均未写入，3 条审批通过用例均仅创建一笔正确订单。
 
-这是六类模板参数变体的小样本、模拟依赖测试，不代表真实 ERP / MCP SSE / MongoDB / Docker 全链路或生产成功率；未作优化前后提升结论。部分回答对工具授权与业务审核的表述仍需改进。详见 [复现说明](evals/business/README.md) 和 [验收报告与原始轨迹](evals/business/results/test-v1/REPORT.md)。
+这是六类模板参数变体的小样本、模拟依赖测试，不代表真实 ERP / MCP / MongoDB / Docker 全链路或生产成功率；未作优化前后提升结论。部分回答对工具授权与业务审核的表述仍需改进。详见 [复现说明](evals/business/README.md) 和 [验收报告与原始轨迹](evals/business/results/test-v1/REPORT.md)。
 
 - 修改 Agent 行为：编辑 `src/agent/memory/prompts.py`（系统提示词）
 - 添加新工具：在 `src/agent/tools/` 创建工具文件，在 `main_agent.py` 注册

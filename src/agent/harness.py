@@ -1,5 +1,5 @@
 """
-Harness 编排模块（真 Harness 架构核心）
+Harness 编排模块
 
 职责：
 1. HarnessPhaseState — 扩展 LangGraph 状态（phase / plan / review_result）
@@ -56,6 +56,8 @@ class HarnessPhaseState(AgentState):
     _review_start: NotRequired[Annotated[int, PrivateStateAttr]]
     _review_write_attempted: NotRequired[Annotated[bool, PrivateStateAttr]]
     _review_signals: NotRequired[Annotated[list[str], PrivateStateAttr]]
+    _human_approved: NotRequired[Annotated[bool, PrivateStateAttr]]
+    """本次请求是否由 HITL resume 人工批准（用于给评审器提供可信的审批上下文）。"""
 
 
 # 配置缺失时的兜底（避免文件缺失导致整个 Agent 启动失败）

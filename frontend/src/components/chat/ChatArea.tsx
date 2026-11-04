@@ -48,7 +48,7 @@ export default function ChatArea({
   const hasMessages = messages.length > 0;
 
   return (
-    <main className="flex-1 flex flex-col h-screen bg-gray-50/50 min-w-0">
+    <main className="flex-1 flex flex-col min-h-0 min-w-0 bg-gray-50/50">
       {/* 顶部工具栏 */}
       {hasMessages && (
         <div className="flex items-center justify-between px-6 py-2 border-b border-gray-100 bg-white/80 backdrop-blur-sm">

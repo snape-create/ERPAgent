@@ -17,6 +17,7 @@
 import os
 import base64
 from pathlib import Path
+from urllib.parse import quote
 from langchain_core.tools import tool
 
 from ..log_utils import agent_logger
@@ -24,26 +25,106 @@ from ..log_utils import agent_logger
 DOWNLOAD_DIR = Path(__file__).parent.parent.parent / "download"
 
 
-def _get_docker_container():
-    """获取 Docker 沙箱容器"""
+def _path_has_content(container, path: str) -> bool:
+    """判断路径是否"存在且有内容"。
+
+    仅用 ``test -e`` 不足以在多个沙箱间消歧：``/workspace/output`` 这类目录
+    在所有沙箱里都由 bootstrap 创建，目录本身存在但可能是空的。
+    因此目录还要额外确认非空。
+
+    注意 exec_run 默认 ``shell=False``，涉及管道/重定向必须显式走 ``sh -c``。
+    """
+    import shlex
+
+    if container.exec_run(["test", "-e", path]).exit_code != 0:
+        return False
+
+    if container.exec_run(["test", "-d", path]).exit_code == 0:
+        probe = container.exec_run(
+            ["sh", "-c", f"ls -A {shlex.quote(path)} 2>/dev/null | head -n 1"]
+        )
+        return bool((probe.output or b"").strip())
+
+    return True
+
+
+def _get_docker_container(remote_path: str = ""):
+    """定位 Docker 沙箱容器。
+
+    预热池会同时存在多个 ``erp-sandbox-*`` 容器：一个被当前会话 claim，
+    其余处于 WARM 空闲待命。早期实现直接取 ``containers.list()`` 的第一个，
+    可能拿到空容器，导致明明生成成功的文件被报告成"文件不存在"。
+
+    这里按三级优先级定位：
+    1. 当前请求上下文绑定的沙箱（``sandbox_holder``）—— 最准确，不受容器数量影响
+    2. 固定命名容器（单容器部署场景）
+    3. 在候选容器中按 ``remote_path`` 是否存在消歧
+    4. 兜底取第一个运行中的容器
+
+    Args:
+        remote_path: 待访问的沙箱内路径，用于第 3 级消歧
+    """
     try:
         import docker
         client = docker.from_env()
-        # 尝试连接默认沙箱容器
-        for name in ["erp-sandbox", "erp-sandbox-default_user"]:
+    except Exception as e:
+        agent_logger.warning(f"Cannot connect to Docker: {e}")
+        return None, None
+
+    try:
+        # 1) 当前请求绑定的沙箱
+        try:
+            from ..backends.sandbox_holder import get_sandbox
+
+            bound = get_sandbox()
+            bound_name = getattr(bound, "container_name", None) if bound else None
+            if bound_name:
+                try:
+                    container = client.containers.get(bound_name)
+                    if container.status == "running":
+                        return container, client
+                except Exception:
+                    agent_logger.debug(
+                        f"Bound sandbox '{bound_name}' unavailable, falling back"
+                    )
+        except Exception:
+            pass
+
+        # 2) 固定命名容器
+        for name in ("erp-sandbox", "erp-sandbox-default_user"):
             try:
                 container = client.containers.get(name)
                 if container.status == "running":
                     return container, client
             except Exception:
                 continue
-        # 尝试查找任何 erp-sandbox- 开头的容器
-        for container in client.containers.list():
-            if container.name.startswith("erp-sandbox-") and container.status == "running":
-                return container, client
+
+        candidates = [
+            c
+            for c in client.containers.list()
+            if c.name.startswith("erp-sandbox-") and c.status == "running"
+        ]
+
+        # 3) 按目标路径存在性消歧
+        if remote_path and len(candidates) > 1:
+            for container in candidates:
+                try:
+                    if _path_has_content(container, remote_path):
+                        return container, client
+                except Exception:
+                    continue
+
+        if candidates:
+            return candidates[0], client
+
+        client.close()
         return None, None
     except Exception as e:
         agent_logger.warning(f"Cannot connect to Docker: {e}")
+        try:
+            client.close()
+        except Exception:
+            pass
         return None, None
 
 
@@ -70,22 +151,25 @@ def download_sandbox_file(remote_path: str, filename: str = "") -> str:
         filename = Path(remote_path).name
 
     # === 方式1：从 Docker 沙箱下载 ===
-    container, docker_client = _get_docker_container()
+    container, docker_client = _get_docker_container(remote_path)
     if container is not None:
         try:
-            # 检查文件是否存在
-            check = container.exec_run(f"test -f '{remote_path}' && echo EXISTS || echo NOT_FOUND")
-            if check.exit_code != 0 or b"NOT_FOUND" in (check.output or b""):
+            # 检查文件是否存在。
+            # 必须用 exec 列表形式：exec_run 默认 shell=False，走 execve 而非 shell，
+            # 写成 "test -f x && echo EXISTS" 会把 && 当参数传给 test，
+            # 返回 exit 2（"extra argument"），被误判成文件不存在。
+            check = container.exec_run(["test", "-f", remote_path])
+            if check.exit_code != 0:
                 docker_client.close()
                 return f"文件不存在于沙箱中: {remote_path}"
 
             # 获取文件大小
-            size_check = container.exec_run(f"stat -c %s '{remote_path}'")
+            size_check = container.exec_run(["stat", "-c", "%s", remote_path])
             file_size = int(size_check.output.decode().strip()) if size_check.exit_code == 0 else 0
 
             # 使用 base64 读取文件（支持二进制）
             read_result = container.exec_run(
-                f"base64 '{remote_path}'",
+                ["base64", remote_path],
                 demux=True,
             )
 
@@ -107,7 +191,8 @@ def download_sandbox_file(remote_path: str, filename: str = "") -> str:
 
             docker_client.close()
 
-            download_url = f"http://localhost:8000/api/download/{filename}"
+            # 文件名可能含中文/空格，URL 里必须做百分号编码，否则浏览器无法直接打开
+            download_url = f"http://localhost:8000/api/download/{quote(filename)}"
             agent_logger.info(
                 f"File downloaded from sandbox: {remote_path} -> {target} ({len(content)} bytes)"
             )
@@ -135,7 +220,7 @@ def download_sandbox_file(remote_path: str, filename: str = "") -> str:
         import shutil
         shutil.copy2(source, target)
 
-        download_url = f"http://localhost:8000/api/download/{filename}"
+        download_url = f"http://localhost:8000/api/download/{quote(filename)}"
         agent_logger.info(f"File downloaded (local fallback): {source} -> {target}")
         return (
             f"✅ 文件已下载!\n"
@@ -165,12 +250,12 @@ def list_sandbox_files(path: str = "/workspace") -> str:
     Returns:
         文件列表
     """
-    container, docker_client = _get_docker_container()
+    container, docker_client = _get_docker_container(path)
     if container is None:
         return "沙箱不可用"
 
     try:
-        result = container.exec_run(f"ls -lah '{path}'")
+        result = container.exec_run(["ls", "-lah", path])
         output = result.output.decode("utf-8", errors="replace") if result.output else ""
         if docker_client:
             docker_client.close()

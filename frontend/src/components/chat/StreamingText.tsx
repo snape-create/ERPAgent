@@ -1,50 +1,83 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
+import Markdown from "./Markdown";
 
 interface Props {
   text: string;
   speed?: number; // 每帧显示的字符数（默认2）
+  markdown?: boolean; // 是否以 Markdown 渲染（流式回答时应为 true）
 }
 
 /**
  * 打字机效果组件
- * 使用持久化 requestAnimationFrame 循环，不因 text 变化而取消动画
- * 解决：token 到达频率 > RAF 间隔时动画被反复取消导致文字一整块出现的 bug
+ *
+ * 用 requestAnimationFrame 逐字推进，并区分两种刷新节奏：
+ * - 纯文本：每帧刷新
+ * - Markdown：每帧重建语法树代价高，限制到约 20fps
+ *
+ * 循环采用"追上即停、有新内容再唤醒"的模型：
+ * 早期版本每帧都跑（浪费 CPU），后来改成每次 text 变化就 cancel 重启，
+ * 结果 token 密集时动画永远跑不到第一帧，文字会整块突然出现。
+ * 现在由独立的唤醒 effect 负责启动，已在运行时不打断。
  */
-export default function StreamingText({ text, speed = 2 }: Props) {
+export default function StreamingText({ text, speed = 2, markdown = false }: Props) {
   const [displayedCount, setDisplayedCount] = useState(0);
   const countRef = useRef(0);
   const targetRef = useRef(0);
   const rafRef = useRef<number>(0);
   const runningRef = useRef(false);
+  const lastPaintRef = useRef(0);
 
   // 始终同步目标长度（不触发 effect）
   targetRef.current = text.length;
 
-  // 启动一次持久动画循环（整个组件生命周期只启动一次）
-  useEffect(() => {
+  const start = useCallback(() => {
     if (runningRef.current) return;
     runningRef.current = true;
 
-    const animate = () => {
+    const animate = (now: number) => {
       const target = targetRef.current;
       const current = countRef.current;
 
-      if (current < target) {
-        // 智能追赶：差距大时加速，接近时逐字
-        const gap = target - current;
-        const increment = gap > 80 ? speed * 4 : gap > 40 ? speed * 3 : gap > 15 ? speed * 2 : speed;
-        countRef.current = Math.min(current + increment, target);
+      // 追上了就停下，等下一次 text 增长时由唤醒 effect 重启
+      if (current >= target) {
+        runningRef.current = false;
+        rafRef.current = 0;
+        return;
+      }
+
+      // 智能追赶：差距大时加速，接近时逐字
+      const gap = target - current;
+      const increment = gap > 80 ? speed * 4 : gap > 40 ? speed * 3 : gap > 15 ? speed * 2 : speed;
+      countRef.current = Math.min(current + increment, target);
+
+      const caughtUp = countRef.current >= target;
+      // 纯文本每帧刷新即可；Markdown 限流，避免长回答流式输出时掉帧
+      if (!markdown || caughtUp || now - lastPaintRef.current >= 50) {
+        lastPaintRef.current = now;
         setDisplayedCount(countRef.current);
       }
 
-      // 永不停止循环（组件卸载时才停止）
+      if (caughtUp) {
+        runningRef.current = false;
+        rafRef.current = 0;
+        return;
+      }
+
       rafRef.current = requestAnimationFrame(animate);
     };
 
     rafRef.current = requestAnimationFrame(animate);
+  }, [speed, markdown]);
 
+  // 有新内容时唤醒循环；已经在跑就不打断
+  useEffect(() => {
+    if (targetRef.current > countRef.current) start();
+  }, [text.length, start]);
+
+  // 仅在卸载时停止循环
+  useEffect(() => {
     return () => {
       runningRef.current = false;
       if (rafRef.current) {
@@ -52,7 +85,7 @@ export default function StreamingText({ text, speed = 2 }: Props) {
         rafRef.current = 0;
       }
     };
-  }, [speed]);
+  }, []);
 
   // 新消息重置
   useEffect(() => {
@@ -60,7 +93,7 @@ export default function StreamingText({ text, speed = 2 }: Props) {
       countRef.current = 0;
       setDisplayedCount(0);
     }
-  }, [text]);
+  }, [text.length]);
 
   // 等待状态（还没有任何文字）
   if (!text) {
@@ -76,13 +109,24 @@ export default function StreamingText({ text, speed = 2 }: Props) {
   const displayedText = text.slice(0, displayedCount);
   const isComplete = displayedCount >= text.length;
 
+  // 打字光标
+  const cursor = !isComplete && (
+    <span className="inline-block w-[2px] h-[1em] bg-blue-500 ml-0.5 align-middle animate-pulse" />
+  );
+
+  if (markdown) {
+    return (
+      <div>
+        <Markdown>{displayedText}</Markdown>
+        {cursor}
+      </div>
+    );
+  }
+
   return (
     <span className="whitespace-pre-wrap">
       {displayedText}
-      {/* 打字光标 */}
-      {!isComplete && (
-        <span className="inline-block w-[2px] h-[1em] bg-blue-500 ml-0.5 align-middle animate-pulse" />
-      )}
+      {cursor}
     </span>
   );
 }

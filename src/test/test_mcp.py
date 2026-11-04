@@ -17,12 +17,15 @@ async def test_mcp_connection():
     from langchain_mcp_adapters.client import MultiServerMCPClient
 
     mcp_url = os.getenv("MCP_SERVER_URL", "http://localhost:9000")
-    print(f"[1] 连接 MCP Server: {mcp_url}/sse")
+    transport = os.getenv("MCP_TRANSPORT", "streamable-http").strip().lower()
+    client_transport = "sse" if transport == "sse" else "streamable_http"
+    path = "/sse" if transport == "sse" else "/mcp"
+    print(f"[1] 连接 MCP Server: {mcp_url}{path} (transport={client_transport})")
 
     client = MultiServerMCPClient({
         "erp": {
-            "url": f"{mcp_url}/sse",
-            "transport": "sse",
+            "url": f"{mcp_url}{path}",
+            "transport": client_transport,
         }
     })
 

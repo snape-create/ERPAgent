@@ -35,32 +35,37 @@
 
 本次检查时 Docker 在 WSL 不可用，因此尚未验证真实 Docker/MongoDB/模型的完整链路。
 
-## 三个 WSL 终端分别启动
+## 三个 WSL 终端分别启动（MCP 工具已内嵌，无需单独启动）
 
-终端 1：MCP 服务
+终端 1：ERP 后端（Mock，端口 8081，提供业务数据）
 
 ```bash
-cd ~/projects/ERP-AGENT-open-source
-.venv/bin/python -m src.mcp_server.server_main
+cd ~/github_repo/ERP-AGENT-open-source
+# 先确保 PostgreSQL 已启动：sudo docker compose up -d postgres
+.venv/bin/python -m src.erp_service.main
 ```
 
-终端 2：后端（先确认 MCP 已启动）
+终端 2：后端（已内嵌 23 个 ERP MCP 工具）
 
 ```bash
-cd ~/projects/ERP-AGENT-open-source
+cd ~/github_repo/ERP-AGENT-open-source
 .venv/bin/python -m src.api_view.web_main
 ```
 
 终端 3：前端
 
 ```bash
-cd ~/projects/ERP-AGENT-open-source/frontend
+cd ~/github_repo/ERP-AGENT-open-source/frontend
 source ~/.nvm/nvm.sh
 nvm use 22
 npm run dev
 ```
 
 浏览器访问 http://localhost:3000 。不要同时启动旧版的同端口服务。
+
+> 已有真实 ERP 时，终端 1 无需启动，直接改 .env 的 `ERP_BASE_URL` 指向真实服务即可。
+> 旧方式（独立 MCP Server :9000，Streamable HTTP）仍支持：先在 .env 设 `MCP_USE_EMBEDDED=false`，
+> 再 `python -m src.mcp_server.server_main` 单独启动。如需旧协议再加 `MCP_TRANSPORT=sse`。
 
 ## 验证记忆
 

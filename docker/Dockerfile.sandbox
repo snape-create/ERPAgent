@@ -1,0 +1,31 @@
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    MPLCONFIGDIR=/tmp/matplotlib \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_LINK_MODE=copy \
+    UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+
+# apt 换国内源，加速构建
+RUN set -eux; \
+    if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources; \
+    fi; \
+    if [ -f /etc/apt/sources.list ]; then \
+        sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list; \
+    fi
+
+# 中文字体：图表标题和标签含中文时避免显示成方块
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fonts-wqy-microhei \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv 装包比 pip 快一个数量级；依赖固定装进镜像，运行时不需要联网
+RUN pip install --no-cache-dir uv \
+    && uv pip install --system --no-cache \
+        matplotlib numpy pandas
+
+WORKDIR /workspace
+
+CMD ["sleep", "infinity"]
