@@ -35,9 +35,8 @@ def web_search(query: str) -> str:
                 "Content-Type": "application/json",
             },
             json={
-                # 搜索接口只接受 DeepSeek 搜索模型；不要复用可能仍是
-                # qwen3.8-27b 等旧配置的 LLM_MODEL。
-                "model": get_env("WEB_SEARCH_MODEL", "deepseek-flash"),
+
+                "model": get_env("WEB_SEARCH_MODEL", "deepseek-v4-pro"),
                 "instructions": (
                     "你是一个联网搜索助手。请使用 web_search 获取最新、可靠的信息，"
                     "用中文总结结果；如果搜索结果不足或无法确认，请明确说明。"

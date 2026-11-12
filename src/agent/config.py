@@ -3,8 +3,9 @@
 LLM、Store、Checkpointer、沙箱连接参数
 """
 import os
+import tomllib
 from langchain_deepseek import ChatDeepSeek
-from .env_utils import get_env, get_env_int
+from .env_utils import get_env, get_env_int, PROJECT_ROOT
 
 # ============ LLM 配置 ============
 LLM_MODEL = get_env("LLM_MODEL", "deepseek-flash")
@@ -14,6 +15,9 @@ LLM_TEMPERATURE = 0.1
 LLM_MAX_TOKENS = 4096
 LLM_REASONING_EFFORT = get_env("LLM_REASONING_EFFORT", "high")
 
+
+# ============ jev决策模型配置 ============
+ENDPOINT = "https://ph8.co/openai/v1"
 
 def get_llm(*, thinking: bool = True, timeout: float | None = None,
             max_retries: int = 2, max_tokens: int = LLM_MAX_TOKENS) -> ChatDeepSeek:
@@ -43,15 +47,6 @@ def get_llm(*, thinking: bool = True, timeout: float | None = None,
         extra_body={"thinking": {"type": "disabled"}},
     )
 
-    # DeepSeek 的 response_format 只支持 {"type": "json_object"}，不支持
-    # json_schema。但 LangChain 内置的模型 profile 把 structured_output 标为
-    # True，导致 create_agent / with_structured_output 选择 ProviderStrategy
-    # 并发送 json_schema，服务端直接返回 400：
-    #   "This response_format type is unavailable now"
-    # 评审器（RubricMiddleware grader）因此全量失败。
-    #
-    # 关掉该能力声明后，LangChain 回退到 ToolStrategy（function calling），
-    # 这是 DeepSeek 支持的路径。profile 是实例级 dict，修改不影响其他实例。
     profile = getattr(model, "profile", None)
     if isinstance(profile, dict):
         profile["structured_output"] = False
@@ -77,19 +72,67 @@ MCP_URL = f"{MCP_SERVER_URL}{MCP_PATH}"
 # 兼容旧名称
 MCP_SSE_URL = MCP_URL
 
-# ============ 沙箱配置 ============
-SANDBOX_IMAGE = get_env("SANDBOX_IMAGE", "python:3.11-slim")#Docker 镜像名称，具体是 Python 3.11 的 slim（精简）版本
-SANDBOX_WORK_DIR = "/workspace"
-SANDBOX_SKILLS_DIR = "/skills"
-SANDBOX_MEMORIES_DIR = "/memories"
-SANDBOX_WARM_POOL_SIZE = get_env_int("SANDBOX_WARM_POOL_SIZE", 1)
-SANDBOX_IDLE_TIMEOUT_MINUTES = get_env_int("SANDBOX_IDLE_TIMEOUT_MINUTES", 30)
-SANDBOX_MAINTENANCE_INTERVAL_SECONDS = get_env_int(
-    "SANDBOX_MAINTENANCE_INTERVAL_SECONDS", 60
+# ============ 沙箱配置（TOML 优先，环境变量兜底）============
+# 配置文件统一放在项目根目录 config/ 下
+_SANDBOX_TOML = PROJECT_ROOT / "config" / "sandbox_config.toml"
+
+
+def _load_sandbox_toml() -> dict:
+    """读取沙箱 TOML；文件缺失或格式错误时回退为空 dict，不影响业务。"""
+    try:
+        with open(_SANDBOX_TOML, "rb") as f:
+            return tomllib.load(f).get("sandbox", {})
+    except (OSError, tomllib.TOMLDecodeError):
+        print(f"⚠️ sandbox_config.toml 读取失败，回退到环境变量/默认值: {_SANDBOX_TOML}")
+        return {}
+
+
+_SANDBOX_TOML_DATA = _load_sandbox_toml()
+
+
+def _sandbox_get(section: str, key: str, env_key: str | None, default, cast=None):
+    """优先级：TOML > 环境变量 > 默认值。"""
+    data = _SANDBOX_TOML_DATA if not section else _SANDBOX_TOML_DATA.get(section, {})
+    value = data.get(key)
+    if value is None and env_key:
+        env = os.getenv(env_key)
+        value = env if env is not None else None
+    if value is None:
+        return default
+    return cast(value) if cast else value
+
+
+def _to_int(value):
+    return int(value)
+
+
+SANDBOX_IMAGE = _sandbox_get("", "image", "SANDBOX_IMAGE", "python:latest")
+SANDBOX_WORK_DIR = _sandbox_get("", "work_dir", "SANDBOX_WORK_DIR", "/workspace")
+SANDBOX_SKILLS_DIR = _sandbox_get("", "skills_dir", "SANDBOX_SKILLS_DIR", "/skills")
+SANDBOX_MEMORIES_DIR = _sandbox_get("", "memories_dir", "SANDBOX_MEMORIES_DIR", "/memories")
+SANDBOX_WARM_POOL_SIZE = _sandbox_get("", "warm_pool_size", "SANDBOX_WARM_POOL_SIZE", 1, _to_int)
+SANDBOX_IDLE_TIMEOUT_MINUTES = _sandbox_get(
+    "", "idle_timeout_minutes", "SANDBOX_IDLE_TIMEOUT_MINUTES", 30, _to_int
 )
-SANDBOX_HEALTH_CHECK_INTERVAL_SECONDS = get_env_int(
-    "SANDBOX_HEALTH_CHECK_INTERVAL_SECONDS", 30
+SANDBOX_MAINTENANCE_INTERVAL_SECONDS = _sandbox_get(
+    "", "maintenance_interval_seconds", "SANDBOX_MAINTENANCE_INTERVAL_SECONDS", 60, _to_int
 )
+SANDBOX_HEALTH_CHECK_INTERVAL_SECONDS = _sandbox_get(
+    "", "health_check_interval_seconds", "SANDBOX_HEALTH_CHECK_INTERVAL_SECONDS", 30, _to_int
+)
+
+# SandboxConfig dataclass 的默认值（backends/sandbox_setup.py 引用）
+SANDBOX_CONTAINER = {
+    "read_only": _sandbox_get("container", "read_only", None, True),
+    "memory_limit": _sandbox_get("container", "memory_limit", None, "512m"),
+    "cpu_limit": _sandbox_get("container", "cpu_limit", None, 1.0),
+    "network_mode": _sandbox_get("container", "network_mode", None, "bridge"),
+    "tmpfs_size": _sandbox_get("container", "tmpfs_size", None, "128m"),
+    "drop_all_caps": _sandbox_get("container", "drop_all_caps", None, True),
+    "use_seccomp": _sandbox_get("container", "use_seccomp", None, True),
+    "seccomp_path": _sandbox_get("container", "seccomp_path", None, ""),
+    "runtimes": _sandbox_get("container", "runtimes", None, ["python"]),
+}
 
 # ============ Store 命名空间 ============
 SKILLS_STORE_NAMESPACE = ("persisted-skills",)

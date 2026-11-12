@@ -1,15 +1,28 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { v4 as uuidv4 } from "uuid";
-import { ChatMessage, ToolCallInfo, SSEEvent, InterruptData, TodoItem } from "@/lib/types";
+import {
+  ChatMessage,
+  ToolCallInfo,
+  SSEEvent,
+  InterruptData,
+  TodoItem,
+  HarnessPhase,
+} from "@/lib/types";
 import { streamChat, resumeChat } from "@/lib/api";
 import { useSSE } from "./useSSE";
 
 const USER_ID = "user-001";
 const USERNAME = "采购管理员";
 
-export type HarnessPhase = "idle" | "thinking" | "planning" | "executing" | "reviewing" | "done";
+const VALID_PHASES: ReadonlySet<string> = new Set([
+  "thinking",
+  "planning",
+  "executing",
+  "reviewing",
+  "done",
+]);
 
 export function useChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -29,11 +42,33 @@ export function useChat() {
   const toolCallsRef = useRef<ToolCallInfo[]>([]);
   const currentToolIdRef = useRef<string>("");
   const pendingQueueRef = useRef<string[]>([]);
+  const thinkingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const interruptedRef = useRef(false);
 
   const resetAssistantState = useCallback(() => {
     assistantMsgRef.current = "";
     toolCallsRef.current = [];
     currentToolIdRef.current = "";
+  }, []);
+
+  // 重置所有瞬时 UI 状态（todo / 阶段条 / 思考动画）
+  const resetTransientUi = useCallback(() => {
+    setThinking(false);
+    setTodoItems([]);
+    setTodoVisible(false);
+    setPhase("idle");
+    setPhaseLabel("");
+    if (thinkingTimerRef.current) {
+      clearTimeout(thinkingTimerRef.current);
+      thinkingTimerRef.current = null;
+    }
+  }, []);
+
+  // 组件卸载时清理遗留定时器
+  useEffect(() => {
+    return () => {
+      if (thinkingTimerRef.current) clearTimeout(thinkingTimerRef.current);
+    };
   }, []);
 
   const updateAssistantMessage = useCallback(() => {
@@ -85,8 +120,16 @@ export function useChat() {
         }
 
         case "tool_result": {
+          // 优先按 id 精确匹配；后端未带 id 时，退化为"当前运行实例"，
+          // 再不行才按同名 + running 匹配（兼容旧后端）。
+          const targetId =
+            event.id ??
+            currentToolIdRef.current ??
+            toolCallsRef.current.find(
+              (tc) => tc.name === event.name && tc.status === "running"
+            )?.id;
           toolCallsRef.current = toolCallsRef.current.map((tc) =>
-            tc.name === event.name && tc.status === "running"
+            tc.id === targetId
               ? { ...tc, result: event.content, status: "done" as const }
               : tc
           );
@@ -102,24 +145,49 @@ export function useChat() {
           break;
         }
 
-        case "interrupt":
+        case "interrupt": {
+          // 归一化：interrupt_type 可能出现在事件顶层、data 内，
+          // 甚至被后端写成 type / action_type，这里统一收敛到 interrupt_type，
+          // 保证 InterruptBanner 一定能识别出类型（否则界面会静默空白）
+          const rawData = (event.data ?? {}) as InterruptData &
+            Record<string, unknown>;
+          const type =
+            rawData.interrupt_type ??
+            (rawData.type as string | undefined) ??
+            (rawData.action_type as string | undefined) ??
+            event.interrupt_type ??
+            "";
+          const normalized: InterruptData = { ...rawData, interrupt_type: type };
+          interruptedRef.current = true;
           setInterrupted(true);
-          setInterruptData(event.data);
+          setInterruptData(normalized);
           break;
+        }
 
         case "thinking":
           if (event.status === "start") {
+            if (thinkingTimerRef.current) {
+              clearTimeout(thinkingTimerRef.current);
+              thinkingTimerRef.current = null;
+            }
             setThinking(true);
             setPhase("thinking");
             setPhaseLabel("💭 深度思考中");
           } else {
-            // 延迟结束 thinking，保证动画至少显示 800ms
-            setTimeout(() => setThinking(false), 800);
+            // 延迟结束 thinking，保证动画至少显示 800ms；timer 可被清理
+            if (thinkingTimerRef.current) clearTimeout(thinkingTimerRef.current);
+            thinkingTimerRef.current = setTimeout(() => {
+              setThinking(false);
+              thinkingTimerRef.current = null;
+            }, 800);
           }
           break;
 
         case "phase":
-          setPhase(event.phase as HarnessPhase);
+          // 白名单校验，防止未知字符串写入阶段状态
+          if (VALID_PHASES.has(event.phase)) {
+            setPhase(event.phase as HarnessPhase);
+          }
           setPhaseLabel(event.label);
           break;
 
@@ -172,13 +240,14 @@ export function useChat() {
           if (event.interrupted) {
             setInterrupted(true);
           }
-          // 检查排队队列，有消息自动发出
+          // 检查排队队列：进入审批中断时不自动发送，等用户处理完中断
           const q = pendingQueueRef.current;
-          if (q.length > 0) {
+          if (q.length > 0 && !event.interrupted) {
             const next = q.shift()!;
             setPendingQueue([...q]);
-            // 延迟一帧发送，确保 streaming 状态已更新
-            setTimeout(() => doSend(next), 50);
+            // 延迟一帧发送，确保 streaming 状态已更新；
+            // 用 ref 调用最新的 doSend，避免陈旧闭包把消息发到旧 thread
+            setTimeout(() => doSendRef.current(next), 50);
           }
           break;
       }
@@ -194,6 +263,10 @@ export function useChat() {
     },
     onComplete: () => {
       setStreaming(false);
+      // 整轮既没有正文、也没有进入中断 → 明确告知，避免"发消息毫无反应"
+      if (!assistantMsgRef.current && !interruptedRef.current) {
+        setError("未收到助手回复，请检查后端服务是否正常后重试");
+      }
     },
   });
 
@@ -203,11 +276,8 @@ export function useChat() {
       setError(null);
       setInterrupted(false);
       setInterruptData(null);
-      setThinking(false);
-      setTodoItems([]);
-      setTodoVisible(false);
-      setPhase("idle");
-      setPhaseLabel("");
+      interruptedRef.current = false;
+      resetTransientUi();
       resetAssistantState();
 
       const userMsg: ChatMessage = {
@@ -232,8 +302,12 @@ export function useChat() {
         )
       );
     },
-    [threadId, start, resetAssistantState]
+    [threadId, start, resetAssistantState, resetTransientUi]
   );
+
+  // 始终持有最新的 doSend，供 SSE done 事件中自动发送排队消息使用
+  const doSendRef = useRef(doSend);
+  doSendRef.current = doSend;
 
   const sendMessage = useCallback(
     (content: string) => {
@@ -253,11 +327,16 @@ export function useChat() {
   );
 
   const resumeWith = useCallback(
-    (resumeData: Record<string, unknown>) => {
+    (resumeData: Record<string,unknown>) => {
       setInterrupted(false);
       setInterruptData(null);
+      setError(null);
+      interruptedRef.current = false;
+      // resume 是同一次执行的延续：保留中断前已输出的正文和工具调用，
+      // 只把阶段条切回执行态（不能停在 done/"✅ 完成"却又在转圈）
       setStreaming(true);
-      resetAssistantState();
+      setPhase("executing");
+      setPhaseLabel("");
 
       start((onChunk, signal) =>
         resumeChat(
@@ -267,7 +346,7 @@ export function useChat() {
         )
       );
     },
-    [threadId, start, resetAssistantState]
+    [threadId, start]
   );
 
   const newChat = useCallback(() => {
@@ -277,11 +356,13 @@ export function useChat() {
     setInterrupted(false);
     setInterruptData(null);
     setError(null);
+    interruptedRef.current = false;
     setThreadId(uuidv4());
     setPendingQueue([]);
     pendingQueueRef.current = [];
+    resetTransientUi();
     resetAssistantState();
-  }, [abort, resetAssistantState]);
+  }, [abort, resetAssistantState, resetTransientUi]);
 
   const loadThread = useCallback(
     (id: string, msgs: ChatMessage[]) => {
@@ -292,9 +373,19 @@ export function useChat() {
       setInterrupted(false);
       setInterruptData(null);
       setError(null);
+      interruptedRef.current = false;
+      setPendingQueue([]);
+      pendingQueueRef.current = [];
+      resetTransientUi();
       resetAssistantState();
     },
-    [abort, resetAssistantState]
+    [abort, resetAssistantState, resetTransientUi]
+  );
+
+  const dismissError = useCallback(() => setError(null), []);
+  const showLoadError = useCallback(
+    () => setError("历史消息加载失败，请检查网络后重试"),
+    []
   );
 
   return {
@@ -315,5 +406,7 @@ export function useChat() {
     newChat,
     loadThread,
     abort,
+    dismissError,
+    showLoadError,
   };
 }

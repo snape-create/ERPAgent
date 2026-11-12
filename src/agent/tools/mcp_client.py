@@ -1,9 +1,5 @@
 """
 MCP 工具加载模块
-
-默认走「进程内加载」：把 FastMCP 里注册的 ERP 工具函数直接转成 LangChain 工具，
-不再需要单独启动一个 MCP Server 进程（省掉 :9000）。
-
 通过环境变量 MCP_USE_EMBEDDED=false 可切回旧的 SSE 模式（连接独立 MCP Server）。
 
 生产级特性：

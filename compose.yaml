@@ -2,7 +2,7 @@ name: erp-agent
 
 services:
   mongo:
-    image: mongo:latest
+    image: mongo:7.0
     container_name: ERP_mongo
     ports:
       - "27017:27017"

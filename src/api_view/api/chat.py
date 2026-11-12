@@ -61,6 +61,8 @@ async def stream_chat_response(
     - 实时将 assistant 回复追加到 display_messages
     - 流结束后持久化到 MongoDB
     """
+    yield sse_event("thinking", {"status": "start", "phase": "initializing"})
+
     # 每个用户有独立 Agent（含 Proxy、中间件缓存和 SandboxManager 映射）。
     session = await agent_loader.get_session(user_id, username)
     config = traced_config(agent_loader.create_config(thread_id, user_id))
@@ -72,8 +74,6 @@ async def stream_chat_response(
     # 加载已有消息（恢复场景）或初始化
     if resume_data:
         display_messages = await agent_loader.get_display_messages(thread_id)
-        # 把“已人工审批”作为可信状态传给下游评审器，
-        # 否则审批后的评审只看到工具执行，会误判为“未经过人工审批”。
         decisions = resume_data.get("decisions", []) if isinstance(resume_data, dict) else []
         approved = any(
             isinstance(d, dict) and d.get("type") == "approve" for d in decisions
@@ -96,14 +96,12 @@ async def stream_chat_response(
     assistant_content = ""
     tool_calls_buffer = []
     thinking_emitted = False
-    phase = "thinking"  # 当前阶段: thinking → planning → executing → reviewing → result
-    last_phase = "thinking"  # 上次已发射的阶段（去重）
-    last_todos_sig = None  # 上次已发射的 todo 列表签名（去重）
+    phase = "thinking"
+    last_phase = "thinking"
+    last_todos_sig = None
     last_review_sig = None
-    harness_trace: list = []  # Harness 阶段流转 trace（P3 可观测）
+    harness_trace: list = []
 
-    # 同一用户的整个流串行运行，避免两个会话同时覆盖 /tmp、/workspace 中的文件。
-    # ContextVar 让图表、文档、Skill 工具在并发用户之间取到正确的稳定 Proxy。
     from ...agent.backends.sandbox_holder import bind_sandbox, reset_sandbox
     from ...agent.backends.sandbox_manager import sandbox_manager
     from ...agent.runtime_context import bind_runtime, reset_runtime
@@ -117,7 +115,6 @@ async def stream_chat_response(
     runtime_tokens = bind_runtime(user_id, agent_loader.store)
 
     try:
-        # 发射“深度思考”事件（前端展示思考动画）
         yield sse_event("thinking", {"status": "start"})
 
         async for namespace, chunk_type, chunk in session.agent.astream(

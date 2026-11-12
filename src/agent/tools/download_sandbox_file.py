@@ -200,8 +200,8 @@ def download_sandbox_file(remote_path: str, filename: str = "") -> str:
                 f"✅ 文件已从沙箱下载!\n"
                 f"沙箱路径: {remote_path}\n"
                 f"文件大小: {file_size / 1024:.1f} KB\n"
-                f"下载链接: {download_url}\n"
-                f"本地路径: {target}"
+                f"下载链接: [下载 {filename}]({download_url})\n"
+                f"本地路径: {target}\n"
             )
 
         except Exception as e:
@@ -226,9 +226,9 @@ def download_sandbox_file(remote_path: str, filename: str = "") -> str:
             f"✅ 文件已下载!\n"
             f"路径: {remote_path}\n"
             f"文件大小: {source.stat().st_size / 1024:.1f} KB\n"
-            f"下载链接: {download_url}\n"
+            f"下载链接: [下载 {filename}]({download_url})\n"
             f"本地路径: {target}\n"
-            f"(注: 沙箱不可用，使用本地文件)"
+            f"(注: 沙箱不可用，使用本地文件)\n"
         )
 
     return (

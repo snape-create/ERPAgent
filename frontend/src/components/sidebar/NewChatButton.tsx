@@ -8,14 +8,12 @@ interface Props {
 
 export default function NewChatButton({ onClick }: Props) {
   return (
-    <div className="px-4 mb-3">
-      <button
-        onClick={onClick}
-        className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-sm font-medium rounded-lg transition-colors"
-      >
-        <Plus size={16} />
-        新建对话
-      </button>
-    </div>
+    <button
+      onClick={onClick}
+      className="w-full h-9 flex items-center justify-center gap-1.5 bg-accent hover:bg-accent-hover active:scale-[0.98] text-white text-[13px] font-medium rounded-ctl transition-[background-color,transform] duration-150 ease-quiet"
+    >
+      <Plus size={16} strokeWidth={1.5} />
+      新建对话
+    </button>
   );
 }

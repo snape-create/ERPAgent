@@ -1,0 +1,39 @@
+# ============================================================
+# 沙箱配置（Sandbox）
+#
+# 优先级：本文件 > 环境变量(.env) > 代码默认值
+# 修改后需重启后端生效。
+# ============================================================
+
+[sandbox]
+# Docker 基础镜像（旧环境变量：SANDBOX_IMAGE）
+image = "erp-agent-sandbox:latest"
+
+# 沙箱内目录
+work_dir = "/workspace"    # 工作目录（SANDBOX_WORK_DIR）
+skills_dir = "/skills"     # 技能目录（SANDBOX_SKILLS_DIR）
+memories_dir = "/memories" # 记忆目录（SANDBOX_MEMORIES_DIR）
+
+# 预热池大小：常驻空闲容器数量（SANDBOX_WARM_POOL_SIZE）
+warm_pool_size = 1
+
+# 空闲容器回收超时（分钟）（SANDBOX_IDLE_TIMEOUT_MINUTES）
+idle_timeout_minutes = 30
+
+# 维护循环间隔（秒）（SANDBOX_MAINTENANCE_INTERVAL_SECONDS）
+maintenance_interval_seconds = 60
+
+# 健康检查间隔（秒）（SANDBOX_HEALTH_CHECK_INTERVAL_SECONDS）
+health_check_interval_seconds = 30
+
+[sandbox.container]
+# 容器安全防护默认值（SandboxConfig 的默认值）
+read_only = true           # 文件系统只读 + tmpfs 可写
+memory_limit = "512m"      # 内存上限
+cpu_limit = 1.0            # CPU 上限（核数）
+network_mode = "bridge"    # bridge = 受限联网，none = 完全隔离
+tmpfs_size = "128m"        # tmpfs 可写区域大小
+drop_all_caps = true       # 移除全部 Linux Capability
+use_seccomp = true         # 启用 seccomp 系统调用白名单
+seccomp_path = ""          # 自定义 seccomp 路径（空则用内置 seccomp.json）
+runtimes = ["python"]      # 多语言运行时：["python", "go", "node"]

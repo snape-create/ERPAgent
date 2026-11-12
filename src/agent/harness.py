@@ -97,7 +97,7 @@ def detect_task_type(messages: list[Any], config: dict[str, Any]) -> str:
     规则：取最近一条 HumanMessage 的文本，按 task_types 的关键词命中判定。
     多个类型命中时取关键词命中数量最多者；无命中返回 "default"。
     """
-    task_types = config.get("task_types", {})
+    task_types:dict = config.get("task_types", {})
     if not task_types:
         return "default"
 
@@ -278,16 +278,16 @@ class HarnessPhaseMiddleware(AgentMiddleware):
         return "HarnessPhaseMiddleware"
 
     def before_agent(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
-        """执行前：按需注入 rubric + 置初始阶段为 planning。
-
-        ``RubricMiddleware`` 本身是 state-driven 的：只有 state 中存在 rubric
-        才会调用 grader。这里不再无条件注入 default rubric，因此“你好”等
-        简单请求不会产生额外的审查模型调用。
-        """
-        return {"phase": Phase.planning.value, **self._review_policy.start(state)}
+        review_update = self._review_policy.start(state)
+        decision = review_update.get("review_decision", {}).get("decision", "skip")
+        phase = Phase.result.value if decision == "skip" else Phase.planning.value
+        return {"phase": phase, **review_update}
 
     async def abefore_agent(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
-        return {"phase": Phase.planning.value, **await self._review_policy.astart(state)}
+        review_update = await self._review_policy.astart(state)
+        decision = review_update.get("review_decision", {}).get("decision", "skip")
+        phase = Phase.result.value if decision == "skip" else Phase.planning.value
+        return {"phase": phase, **review_update}
 
     def after_model(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
         """模型返回后：跟踪阶段 + 同步结构化 plan。

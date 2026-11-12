@@ -25,9 +25,9 @@ from langchain_core.tools import tool
 from ..config import skills_store_namespace
 from ..log_utils import agent_logger
 from ..runtime_context import get_current_store, get_current_user_id
+from ..env_utils import PROJECT_ROOT
 
 # Skills 目录：项目根/src/skills
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 SKILLS_DIR = PROJECT_ROOT / "src" / "skills"
 
 

@@ -26,9 +26,9 @@ from .log_utils import agent_logger
 from .memory.config import DEFAULT_MEMORY_CONFIG
 from .memory.keeper import MemoryKeeper
 from .memory.prompts import MAIN_SYSTEM_PROMPT, MEMORY_USAGE_PROMPT
+from .env_utils import PROJECT_ROOT
 
 # 项目路径
-PROJECT_ROOT = Path(__file__).parent.parent.parent
 SKILLS_DIR = PROJECT_ROOT / "src" / "skills"
 MEMORY_DIR = Path(__file__).parent / "memory"
 
@@ -324,7 +324,7 @@ def create_main_agent(
     from .middlewares.memory_consolidation import MemoryConsolidationMiddleware
     from .middlewares.warm_memory import WarmMemoryMiddleware, WARM_MEMORY_SLOT
     from .middlewares.sandbox_breaker import SandboxCircuitBreakerMiddleware
-    # Harness 阶段状态机 + 评审器（真 Harness 架构核心）
+    # Harness 阶段状态机 + 评审器
     from .harness import HarnessPhaseMiddleware, load_harness_config
     from .middlewares.review_gate import ReviewExecutionGate, SafeRubricMiddleware
 

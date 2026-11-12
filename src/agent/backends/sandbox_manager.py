@@ -190,7 +190,7 @@ class SandboxManager:
         # 生成唯一容器名
         name = f"erp-sandbox-warm-{uuid.uuid4().hex[:12]}"
 
-        # python:3.11-slim 已带 Python；图表和 Skill 依赖按需安装到
+        # 已带 Python；图表和 Skil依赖按需安装到
         # /workspace/python-packages，预热阶段不做耗时网络安装。
         config = SandboxConfig(name=name, runtimes=[])
         sandbox = create_secure_sandbox(config)
@@ -416,7 +416,7 @@ class SandboxManager:
 
         return None
 
-    def _cleanup_mongodb_cache(self, user_id: str):
+    def _cleanup_mongodb_cache(self, user_id: str): 
         """清理 MongoDB 中的无效缓存"""
         try:
             from pymongo import MongoClient

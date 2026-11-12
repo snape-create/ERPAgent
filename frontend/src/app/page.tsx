@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Sidebar from "@/components/sidebar/Sidebar";
 import ChatArea from "@/components/chat/ChatArea";
 import { useChat } from "@/hooks/useChat";
@@ -12,6 +12,7 @@ export default function Home() {
   const chat = useChat();
   const history = useHistory();
   const wasStreaming = useRef(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // 聊天结束后自动刷新历史列表
   // 依赖 history.refresh（稳定）而不是整个 history 对象（每次渲染都是新对象，
@@ -43,7 +44,8 @@ export default function Home() {
         );
         chat.loadThread(threadId, msgs);
       } catch {
-        // 加载失败静默处理
+        // 交给 ChatArea 的错误条展示
+        chat.showLoadError?.();
       }
     },
     [chat]
@@ -75,7 +77,7 @@ export default function Home() {
   }, [chat]);
 
   return (
-    <div className="flex h-screen overflow-hidden">
+    <div className="flex h-dvh overflow-hidden bg-paper">
       <Sidebar
         conversations={history.conversations}
         activeThreadId={chat.threadId}
@@ -84,6 +86,8 @@ export default function Home() {
         onNewChat={chat.newChat}
         onSelectThread={handleSelectThread}
         onDeleteThread={handleDeleteThread}
+        mobileOpen={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
       />
       <ChatArea
         messages={chat.messages}
@@ -96,6 +100,9 @@ export default function Home() {
         pendingQueue={chat.pendingQueue}
         phase={chat.phase}
         phaseLabel={chat.phaseLabel}
+        error={chat.error}
+        onDismissError={chat.dismissError}
+        onOpenSidebar={() => setSidebarOpen(true)}
         onSend={chat.sendMessage}
         onSupplement={handleSupplement}
         onApprove={handleApprove}

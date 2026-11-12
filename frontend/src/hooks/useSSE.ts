@@ -37,7 +37,9 @@ export function useSSE({ onEvent, onError, onComplete }: UseSSEOptions) {
         onComplete?.();
       } catch (err: unknown) {
         if (err instanceof Error && err.name === "AbortError") {
-          return; // 用户主动取消
+          // 仅当自己仍是最新请求时才收尾，避免误伤紧接着发起的新请求
+          if (abortRef.current === controller) onComplete?.();
+          return;
         }
         onError?.(err instanceof Error ? err : new Error(String(err)));
       }

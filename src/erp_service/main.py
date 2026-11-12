@@ -195,13 +195,13 @@ app = FastAPI(title="ERP Backend (Mock)", version="1.0.0", lifespan=lifespan)
 
 
 @app.get("/health")
-async def health():
+def health():
     return {"status": "ok", "service": "erp-backend"}
 
 
 # ================= 供应商 =================
 @app.get("/api/suppliers/search")
-async def supplier_search(name: str | None = None):
+def supplier_search(name: str | None = None):
     with get_engine().connect() as conn:
         data = rows(
             conn.execute(
@@ -213,7 +213,7 @@ async def supplier_search(name: str | None = None):
 
 
 @app.get("/api/suppliers/page")
-async def supplier_page(current: int = 1, size: int = 10, name: str | None = None,
+def supplier_page(current: int = 1, size: int = 10, name: str | None = None,
                         status: int | None = None, creditRating: str | None = None):
     where = " WHERE 1=1"
     params: dict = {}
@@ -234,12 +234,12 @@ async def supplier_page(current: int = 1, size: int = 10, name: str | None = Non
 
 
 @app.get("/api/suppliers/get/{supplier_id}")
-async def supplier_get(supplier_id: int):
+def supplier_get(supplier_id: int):
     return _get_supplier(supplier_id)
 
 
 @app.post("/api/suppliers/create")
-async def supplier_create(body: dict = Body(...)):
+def supplier_create(body: dict = Body(...)):
     engine = get_engine()
     with engine.begin() as conn:
         sid = conn.execute(
@@ -258,7 +258,7 @@ async def supplier_create(body: dict = Body(...)):
 
 
 @app.patch("/api/suppliers/update-status/{supplier_id}")
-async def supplier_update_status(supplier_id: int, status: int):
+def supplier_update_status(supplier_id: int, status: int):
     engine = get_engine()
     with engine.begin() as conn:
         res = conn.execute(
@@ -272,12 +272,12 @@ async def supplier_update_status(supplier_id: int, status: int):
 
 # ================= 零部件 =================
 @app.get("/api/parts/get/{part_id}")
-async def part_get(part_id: int):
+def part_get(part_id: int):
     return _get_part(part_id)
 
 
 @app.get("/api/parts/search")
-async def part_search(name: str | None = None):
+def part_search(name: str | None = None):
     with get_engine().connect() as conn:
         data = rows(
             conn.execute(
@@ -289,7 +289,7 @@ async def part_search(name: str | None = None):
 
 
 @app.get("/api/parts/supplier/{supplier_id}")
-async def part_by_supplier(supplier_id: int):
+def part_by_supplier(supplier_id: int):
     with get_engine().connect() as conn:
         data = rows(
             conn.execute(
@@ -301,7 +301,7 @@ async def part_by_supplier(supplier_id: int):
 
 
 @app.get("/api/parts/page")
-async def part_page(current: int = 1, size: int = 10, name: str | None = None,
+def part_page(current: int = 1, size: int = 10, name: str | None = None,
                     category: str | None = None, supplierId: int | None = None):
     where = " WHERE 1=1"
     params: dict = {}
@@ -322,7 +322,7 @@ async def part_page(current: int = 1, size: int = 10, name: str | None = None,
 
 
 @app.post("/api/parts/create")
-async def part_create(body: dict = Body(...)):
+def part_create(body: dict = Body(...)):
     engine = get_engine()
     with engine.begin() as conn:
         pid = conn.execute(
@@ -353,17 +353,17 @@ async def part_create(body: dict = Body(...)):
 
 # ================= 订单 =================
 @app.post("/api/orders/create")
-async def order_create(body: dict = Body(...)):
+def order_create(body: dict = Body(...)):
     return _write_order(None, body)
 
 
 @app.put("/api/orders/update/{order_id}")
-async def order_update(order_id: int, body: dict = Body(...)):
+def order_update(order_id: int, body: dict = Body(...)):
     return _write_order(order_id, body)
 
 
 @app.get("/api/orders/page")
-async def order_page(current: int = 1, size: int = 10, orderNumber: str | None = None,
+def order_page(current: int = 1, size: int = 10, orderNumber: str | None = None,
                      status: int | None = None, startDate: str | None = None,
                      endDate: str | None = None):
     where = " WHERE 1=1"
@@ -393,12 +393,12 @@ async def order_page(current: int = 1, size: int = 10, orderNumber: str | None =
 
 
 @app.get("/api/orders/get/{order_id}")
-async def order_get(order_id: int):
+def order_get(order_id: int):
     return _get_order(order_id)
 
 
 @app.get("/api/orders/search-details")
-async def order_search_details(partName: str | None = None,
+def order_search_details(partName: str | None = None,
                                startDate: str | None = None,
                                endDate: str | None = None):
     where = " WHERE 1=1"
@@ -432,7 +432,7 @@ async def order_search_details(partName: str | None = None,
 
 
 @app.get("/api/orders/statistics")
-async def order_statistics(startDate: str | None = None, endDate: str | None = None):
+def order_statistics(startDate: str | None = None, endDate: str | None = None):
     where = " WHERE 1=1"
     params: dict = {}
     if startDate:
@@ -470,7 +470,7 @@ async def order_statistics(startDate: str | None = None, endDate: str | None = N
 
 
 @app.patch("/api/orders/update-status/{order_id}")
-async def order_update_status(order_id: int, status: int):
+def order_update_status(order_id: int, status: int):
     engine = get_engine()
     with engine.begin() as conn:
         res = conn.execute(
@@ -484,7 +484,7 @@ async def order_update_status(order_id: int, status: int):
 
 # ================= 库存 =================
 @app.get("/api/inventory/warning")
-async def inventory_warning():
+def inventory_warning():
     with get_engine().connect() as conn:
         data = rows(
             conn.execute(
@@ -495,7 +495,7 @@ async def inventory_warning():
 
 
 @app.get("/api/inventory/page")
-async def inventory_page(current: int = 1, size: int = 10,
+def inventory_page(current: int = 1, size: int = 10,
                          partName: str | None = None,
                          warehouseLocation: str | None = None):
     where = " WHERE 1=1"
@@ -516,7 +516,7 @@ async def inventory_page(current: int = 1, size: int = 10,
 
 
 @app.get("/api/inventory/check")
-async def inventory_check():
+def inventory_check():
     engine = get_engine()
     with engine.connect() as conn:
         summary = one(
@@ -537,7 +537,7 @@ async def inventory_check():
 
 
 @app.post("/api/inventory/inbound")
-async def inventory_inbound(partId: int, quantity: int, warehouseLocation: str | None = None):
+def inventory_inbound(partId: int, quantity: int, warehouseLocation: str | None = None):
     if quantity <= 0:
         raise HTTPException(status_code=400, detail="quantity 必须大于 0")
     engine = get_engine()
@@ -564,7 +564,7 @@ async def inventory_inbound(partId: int, quantity: int, warehouseLocation: str |
 
 
 @app.post("/api/inventory/outbound")
-async def inventory_outbound(partId: int, quantity: int):
+def inventory_outbound(partId: int, quantity: int):
     if quantity <= 0:
         raise HTTPException(status_code=400, detail="quantity 必须大于 0")
     engine = get_engine()
@@ -584,7 +584,7 @@ async def inventory_outbound(partId: int, quantity: int):
 
 
 @app.get("/api/inventory/get/{inventory_id}")
-async def inventory_get(inventory_id: int):
+def inventory_get(inventory_id: int):
     with get_engine().connect() as conn:
         data = one(conn.execute(text(INVENTORY_BASE + " WHERE i.id=:id"), {"id": inventory_id}))
     if not data:

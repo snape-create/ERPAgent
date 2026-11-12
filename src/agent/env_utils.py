@@ -6,12 +6,13 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
+# 项目根目录（src/agent/../../），全项目统一从这里引用，避免到处写 .parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 
 def load_env():
     """加载项目根目录的 .env 文件"""
-    # 项目根目录：src/agent/../../.env
-    project_root = Path(__file__).parent.parent.parent
-    env_file = project_root / ".env"
+    env_file = PROJECT_ROOT / ".env"
     if env_file.exists():
         load_dotenv(env_file, override=True)
     else:

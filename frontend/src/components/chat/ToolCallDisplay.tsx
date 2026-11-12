@@ -1,48 +1,71 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, ChevronRight, Wrench, CheckCircle, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, AlertCircle, Check } from "lucide-react";
 import { ToolCallInfo } from "@/lib/types";
 
 interface Props {
   toolCall: ToolCallInfo;
 }
 
+const STATUS_ICON = {
+  running: <Loader2 size={12} strokeWidth={1.5} className="text-accent animate-spin" />,
+  error: <AlertCircle size={12} strokeWidth={1.5} className="text-negative" />,
+  done: <Check size={12} strokeWidth={1.5} className="text-ink-3" />,
+};
+
+/** 折叠时展示的结果首行，让"调用过什么、拿到了什么"不用展开也能看到 */
+function firstLine(text: string): string {
+  const line =
+    text
+      .split("\n")
+      .map((l) => l.trim())
+      .find(Boolean) ?? "";
+  return line.length > 90 ? `${line.slice(0, 90)}…` : line;
+}
+
 export default function ToolCallDisplay({ toolCall }: Props) {
   const [expanded, setExpanded] = useState(false);
-
-  const statusIcon =
-    toolCall.status === "running" ? (
-      <Loader2 size={13} className="text-blue-500 animate-spin" />
-    ) : (
-      <CheckCircle size={13} className="text-green-500" />
-    );
+  const preview = !expanded && toolCall.result ? firstLine(toolCall.result) : "";
 
   return (
-    <div className="my-1.5 border border-gray-200 rounded-lg overflow-hidden text-xs">
+    <div className="rounded-ctl border border-hairline overflow-hidden">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 py-2 bg-gray-50 hover:bg-gray-100 transition-colors"
+        aria-expanded={expanded}
+        aria-label={`工具调用 ${toolCall.name}`}
+        className="w-full flex items-center gap-2 h-8 px-2 hover:bg-raised/50 transition-colors duration-150 ease-quiet"
       >
-        {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-        <Wrench size={13} className="text-gray-500" />
-        <span className="font-medium text-gray-700">{toolCall.name}</span>
-        <span className="ml-auto">{statusIcon}</span>
+        {expanded ? (
+          <ChevronDown size={13} strokeWidth={1.5} className="shrink-0 text-ink-3" />
+        ) : (
+          <ChevronRight size={13} strokeWidth={1.5} className="shrink-0 text-ink-3" />
+        )}
+        <span className="shrink-0 font-mono text-[12px] text-ink-2 truncate max-w-[45%]">
+          {toolCall.name}
+        </span>
+        {preview && (
+          <span className="min-w-0 flex-1 truncate text-[11px] text-ink-3 text-left">
+            {preview}
+          </span>
+        )}
+        <span className="ml-auto shrink-0">{STATUS_ICON[toolCall.status]}</span>
       </button>
+
       {expanded && (
-        <div className="px-3 py-2 space-y-2 border-t border-gray-100">
+        <div className="px-2 py-2 flex flex-col gap-2 border-t border-hairline">
           {toolCall.args && (
             <div>
-              <span className="text-gray-400 font-medium">参数:</span>
-              <pre className="mt-1 p-2 bg-gray-900 text-gray-100 rounded text-[11px] overflow-x-auto whitespace-pre-wrap">
+              <span className="font-mono text-[11px] text-ink-3">参数</span>
+              <pre className="mt-1 p-2 rounded-[6px] bg-paper border border-hairline font-mono text-[11px] leading-[1.6] text-ink-2 overflow-x-auto whitespace-pre-wrap break-words">
                 {formatJSON(toolCall.args)}
               </pre>
             </div>
           )}
           {toolCall.result && (
             <div>
-              <span className="text-gray-400 font-medium">结果:</span>
-              <pre className="mt-1 p-2 bg-gray-900 text-gray-100 rounded text-[11px] overflow-x-auto whitespace-pre-wrap max-h-40 overflow-y-auto">
+              <span className="font-mono text-[11px] text-ink-3">结果</span>
+              <pre className="mt-1 p-2 rounded-[6px] bg-paper border border-hairline font-mono text-[11px] leading-[1.6] text-ink-2 overflow-x-auto overflow-y-auto max-h-40 whitespace-pre-wrap break-words">
                 {formatJSON(toolCall.result)}
               </pre>
             </div>

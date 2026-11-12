@@ -1,27 +1,61 @@
 @import "tailwindcss";
 
+/* ===== 色板：中性灰 + 品牌蓝 =====
+   页面与卡片取自同一档中性灰，强调色只留给主操作、选中与关键数字。 */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-  --sidebar-bg: #f9fafb;
-  --primary: #2563eb;
-  --primary-hover: #1d4ed8;
-  --coral: #ff6b6b;
-  --border: #e5e7eb;
-  --muted: #6b7280;
+  --base-000: #ffffff; /* 卡片 */
+  --base-025: #fafafa; /* 表格斑马行 */
+  --base-050: #f5f5f6; /* 页面底 */
+  --base-100: #fafafa; /* 侧栏 / 内嵌块 */
+  --base-200: #f4f4f5; /* 抬起面、输入框 */
+  --base-300: #e4e4e7; /* 强分隔、滚动条 */
+  --base-350: #d4d4d8; /* 滚动条 hover */
+  --text-900: #171717;
+  --text-700: #525252;
+  --text-500: #737373;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-soft: #eff4ff;
+  --negative: #b42318;
+  --negative-soft: #fef3f2;
+  --warning: #b45309;
+  --hairline: rgba(23, 23, 23, 0.09);
+  --hairline-strong: rgba(23, 23, 23, 0.16);
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-sidebar: var(--sidebar-bg);
-  --color-primary: var(--primary);
-  --color-primary-hover: var(--primary-hover);
-  --color-coral: var(--coral);
-  --color-border: var(--border);
-  --color-muted: var(--muted);
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
-  --font-mono: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
+  --color-paper: var(--base-050);
+  --color-surface: var(--base-000);
+  --color-sunken: var(--base-100);
+  --color-raised: var(--base-200);
+  --color-hairline: var(--hairline);
+  --color-hairline-strong: var(--hairline-strong);
+  --color-ink: var(--text-900);
+  --color-ink-2: var(--text-700);
+  --color-ink-3: var(--text-500);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-negative: var(--negative);
+  --color-negative-soft: var(--negative-soft);
+  --color-warning: var(--warning);
+
+  --radius-ctl: 8px;
+  --radius-card: 12px;
+  --radius-panel: 14px;
+
+  /* 深度只靠一条柔和的落影，不用彩色光 */
+  --shadow-lift: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-knob: 0 1px 1px rgba(0, 0, 0, 0.18);
+  --shadow-modal: 0 24px 60px rgba(0, 0, 0, 0.16);
+
+  --ease-quiet: cubic-bezier(0.22, 1, 0.36, 1);
+
+  --font-sans: var(--font-plex), var(--font-noto), -apple-system,
+    BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Noto Sans SC",
+    "Microsoft YaHei", sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, "SF Mono", Menlo, Consolas,
+    monospace;
 }
 
 * {
@@ -29,33 +63,74 @@
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: var(--font-sans), -apple-system, BlinkMacSystemFont, "Segoe UI",
-    Roboto, sans-serif;
+  background: var(--base-050);
+  color: var(--text-900);
+  font-family: var(--font-sans);
   margin: 0;
   padding: 0;
 }
 
+::selection {
+  background: var(--accent-soft);
+  color: var(--text-900);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 文本框的聚焦态由外层容器的描边表达，不画直角 outline */
+input:focus-visible,
+textarea:focus-visible {
+  outline: none;
+}
+
+/* 数字一律等宽对齐，像单据上的栏目 */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 快捷键 */
+.keycap {
+  display: inline-block;
+  padding: 0 4px;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  background: var(--base-000);
+  color: var(--text-700);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 15px;
+}
+
 /* Scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--base-300) transparent;
+}
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #d1d5db;
-  border-radius: 3px;
+  background: var(--base-300);
+  border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #9ca3af;
+  background: var(--base-350);
 }
 
 /* Markdown content */
 .markdown-body {
-  line-height: 1.7;
+  font-size: 14px;
+  line-height: 1.72;
+  color: var(--text-900);
   overflow-wrap: break-word;
+  font-variant-numeric: tabular-nums;
 }
 .markdown-body > :first-child {
   margin-top: 0;
@@ -65,7 +140,7 @@ body {
 }
 .markdown-body p {
   margin: 0.6em 0;
-  line-height: 1.7;
+  line-height: 1.72;
 }
 .markdown-body ul,
 .markdown-body ol {
@@ -82,6 +157,9 @@ body {
 .markdown-body li {
   margin: 0.3em 0;
 }
+.markdown-body li::marker {
+  color: var(--text-500);
+}
 .markdown-body li > ul,
 .markdown-body li > ol {
   margin: 0.25em 0;
@@ -90,34 +168,38 @@ body {
   margin: 0.25em 0;
 }
 .markdown-body code {
-  background: #f3f4f6;
-  padding: 0.15em 0.4em;
+  background: var(--base-100);
+  padding: 0.1em 0.35em;
   border-radius: 4px;
   font-size: 0.875em;
-  font-family: var(--font-mono), monospace;
+  font-family: var(--font-mono);
   overflow-wrap: anywhere;
 }
 .markdown-body pre {
-  background: #1f2937;
-  color: #e5e7eb;
-  padding: 1em;
+  background: var(--base-000);
+  color: var(--text-900);
+  border: 1px solid var(--hairline);
+  padding: 0.85em 1em;
   border-radius: 8px;
   overflow-x: auto;
-  margin: 0.75em 0;
+  margin: 0.85em 0;
 }
 .markdown-body pre code {
   background: none;
   padding: 0;
   color: inherit;
-  white-space: pre;
-  overflow-wrap: normal;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
-/* 表格：外层滚动容器，避免宽表撑破气泡 */
+/* 表格：外层滚动容器，避免宽表撑破正文列 */
 .md-table-wrap {
-  margin: 0.75em 0;
+  margin: 0.85em 0;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--hairline);
   border-radius: 8px;
 }
 .markdown-body table {
@@ -127,24 +209,29 @@ body {
      这里给一个温和的最小宽度，真的放不下时才由外层容器横向滚动。 */
   min-width: 480px;
   margin: 0;
-  font-size: 0.95em;
+  font-size: 13px;
   table-layout: auto;
 }
 .markdown-body th,
 .markdown-body td {
-  border: 1px solid var(--border);
-  padding: 0.45em 0.7em;
+  padding: 0.5em 0.75em;
   text-align: left;
   vertical-align: top;
   overflow-wrap: break-word;
+  border-bottom: 1px solid var(--hairline);
+}
+.markdown-body tr:last-child td {
+  border-bottom: 0;
 }
 .markdown-body th {
-  background: #f9fafb;
-  font-weight: 600;
-  color: #111827;
+  background: var(--base-050);
+  font-weight: 500;
+  color: var(--text-700);
+  border-bottom: 1px solid var(--hairline-strong);
+  white-space: nowrap;
 }
 .markdown-body tr:nth-child(even) td {
-  background: #fcfcfd;
+  background: var(--base-025);
 }
 .markdown-body th code,
 .markdown-body td code {
@@ -157,42 +244,48 @@ body {
 .markdown-body h4,
 .markdown-body h5,
 .markdown-body h6 {
-  margin: 1em 0 0.5em;
-  font-weight: 600;
-  line-height: 1.4;
+  margin: 1.1em 0 0.45em;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--text-900);
 }
 .markdown-body h1 {
-  font-size: 1.3em;
+  font-size: 1.24em;
 }
 .markdown-body h2 {
-  font-size: 1.18em;
+  font-size: 1.14em;
 }
 .markdown-body h3 {
-  font-size: 1.06em;
+  font-size: 1.02em;
 }
 .markdown-body h4,
 .markdown-body h5,
 .markdown-body h6 {
   font-size: 1em;
+  color: var(--text-700);
 }
 .markdown-body strong {
   font-weight: 600;
-  color: #111827;
+  color: var(--text-900);
 }
 .markdown-body a {
-  color: var(--primary);
+  color: var(--accent);
   text-decoration: underline;
+  text-decoration-thickness: 1px;
   text-underline-offset: 2px;
+}
+.markdown-body a:hover {
+  color: var(--accent-hover);
 }
 .markdown-body hr {
   border: 0;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--hairline);
   margin: 1.1em 0;
 }
 .markdown-body blockquote {
-  border-left: 3px solid var(--primary);
-  padding-left: 1em;
-  color: var(--muted);
+  border-left: 2px solid var(--base-300);
+  padding-left: 0.9em;
+  color: var(--text-700);
   margin: 0.75em 0;
 }
 .markdown-body blockquote > :first-child {
@@ -202,7 +295,7 @@ body {
   margin-bottom: 0;
 }
 
-/* 数学公式（KaTeX）：块级公式过长时横向滚动，避免撑破气泡 */
+/* 数学公式（KaTeX）：块级公式过长时横向滚动，避免撑破正文列 */
 .markdown-body .katex {
   font-size: 1.05em;
 }
@@ -218,41 +311,48 @@ body {
 /* KaTeX 的 errorColor 默认红色，语法错误时不该抢视觉焦点 */
 .markdown-body .katex-error {
   color: inherit !important;
-  font-family: var(--font-mono), monospace;
+  font-family: var(--font-mono);
   font-size: 0.9em;
 }
 
-/* Animations */
-@keyframes fadeIn {
+/* Animations：一套曲线，一个入口方向 */
+@keyframes riseIn {
   from {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(6px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: none;
   }
 }
-.animate-fade-in {
-  animation: fadeIn 0.3s ease-out;
+.animate-rise {
+  animation: riseIn 320ms var(--ease-quiet) both;
 }
 
-@keyframes pulse-dot {
+/* 仅用于真实的进行中状态（流式输出） */
+@keyframes dot-fade {
   0%,
-  80%,
   100% {
-    transform: scale(0);
+    opacity: 0.25;
   }
-  40% {
-    transform: scale(1);
+  50% {
+    opacity: 1;
   }
 }
 .typing-dot {
-  animation: pulse-dot 1.4s infinite ease-in-out both;
-}
-.typing-dot:nth-child(1) {
-  animation-delay: -0.32s;
+  animation: dot-fade 1.2s ease-in-out infinite;
 }
 .typing-dot:nth-child(2) {
-  animation-delay: -0.16s;
+  animation-delay: 0.16s;
+}
+.typing-dot:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-rise,
+  .typing-dot {
+    animation: none;
+  }
 }

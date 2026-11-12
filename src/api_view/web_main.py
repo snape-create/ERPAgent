@@ -5,7 +5,9 @@ CORS 全开、路由注册、startup/shutdown 事件
 import sys
 import os
 import asyncio
+from mimetypes import guess_type
 from pathlib import Path
+from urllib.parse import quote
 from contextlib import asynccontextmanager, suppress
 
 # 确保项目根目录在 path 中
@@ -97,15 +99,35 @@ DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 @app.get("/api/download/{filename}")
 async def download_file(filename: str):
-    """提供生成文件（图表PNG等）的HTTP下载"""
+    """提供生成文件的 HTTP 访问。
+
+    图片/PDF 用 inline，让浏览器直接预览；其他类型保持 attachment 下载。
+    之前统一用 application/octet-stream，图片点开后只会触发下载，
+    用户很容易以为“点了没反应”。
+    """
     file_path = DOWNLOAD_DIR / filename
     if not file_path.exists() or not file_path.is_file():
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail=f"文件不存在: {filename}")
+
+    media_type = guess_type(filename)[0] or "application/octet-stream"
+    inline = (
+        media_type.startswith("image/")
+        or media_type == "application/pdf"
+        or media_type.startswith("text/")
+    )
+    disposition = "inline" if inline else "attachment"
+    try:
+        encoded_name = quote(filename)
+    except Exception:
+        encoded_name = filename
+    headers = {
+        "Content-Disposition": f"{disposition}; filename*=utf-8''{encoded_name}",
+    }
     return FileResponse(
         path=str(file_path),
-        filename=filename,
-        media_type="application/octet-stream",
+        media_type=media_type,
+        headers=headers,
     )
 
 

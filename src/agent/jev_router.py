@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .review_policy import CHECKS, ROUTER_PROMPT, ReviewRoute
 
-ENDPOINT = "https://api.typesafe.ai/v1/systemone"
+from .config import ENDPOINT
 TASKS = {
     "default": "一般任务或不属于下列领域",
     "analysis": "数据分析、计算、比较与报告",
@@ -55,7 +55,7 @@ def questions():
 
 
 class JevRouter:
-    def __init__(self, *, api_key=None, model="jev-latest", timeout=8,
+    def __init__(self, *, api_key=None, model="jev-1.13.0", timeout=8,
                  min_confidence=0.0, transport=None):
         self.api_key = api_key if api_key is not None else os.getenv("TYPESAFE_API_KEY", "")
         self.model = model

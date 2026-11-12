@@ -7,8 +7,8 @@ import docker
 import base64
 import io
 import os
+import shlex
 import tarfile
-import json
 import uuid
 from typing import Optional
 
@@ -19,6 +19,11 @@ from deepagents.backends.sandbox import (
 from deepagents.backends import DEFAULT_EXECUTE_TIMEOUT
 from ..log_utils import sandbox_logger
 from ..config import SANDBOX_WORK_DIR
+
+
+# 单次 docker exec 参数长度上限约 128KB（MAX_ARG_STRLEN）。
+# 超过该阈值的内容改走分块写入，避免 "Argument list too long"。
+_INLINE_WRITE_LIMIT = 60_000
 
 
 class CustomOpenSandbox(BaseSandbox):
@@ -96,12 +101,7 @@ class CustomOpenSandbox(BaseSandbox):
     # 核心执行
     # ============================================================
 
-    def execute(
-        self,
-        command: str,
-        *,
-        timeout: int | None = None,
-    ) -> ExecuteResponse:
+    def execute(self,command: str,*,timeout: int | None = None,) -> ExecuteResponse:
         """
         在 Docker 容器中执行 shell 命令
 
@@ -119,9 +119,20 @@ class CustomOpenSandbox(BaseSandbox):
             )
 
         try:
-            # 在工作目录下执行命令
+            # 超时控制：coreutils timeout 先发 TERM，5 秒后 KILL（超时退出码 124）。
+            # workdir 已由 exec_run 生效，无需再拼 "cd xxx &&"。
+            effective_timeout = (
+                timeout if timeout is not None else self._default_timeout
+            )
+            if effective_timeout and effective_timeout > 0:
+                cmd = [
+                    "timeout", "-k", "5", str(int(effective_timeout)),
+                    "bash", "-c", command,]
+            else:
+                cmd = ["bash", "-c", command]
+
             exec_result = self._container.exec_run(
-                cmd=["bash", "-c", f"cd {self._work_dir} && {command}"],
+                cmd=cmd,
                 demux=True,  # 分离 stdout/stderr
                 workdir=self._work_dir,
             )
@@ -142,12 +153,16 @@ class CustomOpenSandbox(BaseSandbox):
 
             output = "\n".join(output_parts) if output_parts else ""
 
-            # 截断过长输出
+
             truncated = False
-            max_bytes = 100_000
+            max_bytes = 5_000_000
             if len(output) > max_bytes:
-                output = output[:max_bytes] + "\n... [output truncated]"
-                truncated = True
+                output = output[:max_bytes]
+                truncated = True # 错误和成功信息分开输出
+                sandbox_logger.warning(
+                    f"Sandbox output truncated at {max_bytes} chars "
+                    f"(command: {command[:80]!r})"
+                )
 
             return ExecuteResponse(
                 output=output,
@@ -175,28 +190,39 @@ class CustomOpenSandbox(BaseSandbox):
 
     def read_file_bytes(self, path: str) -> bytes:
         """读取沙箱内文件内容（二进制，base64 传输）"""
-        resp = self.execute(f"base64 '{path}'")
+        resp = self.execute(f"base64 {shlex.quote(path)}")
         if resp.exit_code != 0:
             raise FileNotFoundError(f"Cannot read file: {path} — {resp.output}")
+        if resp.truncated:
+            # base64 被截断后可能解出半截数据而不报错，必须显式失败
+            raise IOError(
+                f"File too large for single-shot transfer: {path}. "
+                f"Use download_files in chunks or raise max_bytes."
+            )
         return base64.b64decode(resp.output.strip())
 
     def write_file(self, path: str, content: str | bytes) -> str:
         """写入内容到沙箱内文件（自动创建父目录）"""
-        # 确保父目录存在
-        dir_path = "/".join(path.rstrip("/").split("/")[:-1]) or "/"
-        self.execute(f"mkdir -p '{dir_path}'")
+        data = content.encode("utf-8") if isinstance(content, str) else content
 
-        if isinstance(content, str):
-            # 文本写入：base64 编码避免 shell 转义问题
-            encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-            resp = self.execute(f"echo '{encoded}' | base64 -d > '{path}'")
+        dir_path = os.path.dirname(path) or "/"
+        self.execute(f"mkdir -p {shlex.quote(dir_path)}")
+
+        if len(data) <= _INLINE_WRITE_LIMIT:
+            # 小文件：单条命令写入（base64 避免 shell 转义问题）
+            encoded = base64.b64encode(data).decode("ascii")
+            resp = self.execute(
+                f"printf '%s' {shlex.quote(encoded)} | base64 -d > {shlex.quote(path)}"
+            )
+            if resp.exit_code != 0:
+                raise IOError(f"Cannot write file: {path} — {resp.output}")
         else:
-            # 二进制写入
-            encoded = base64.b64encode(content).decode("ascii")
-            resp = self.execute(f"echo '{encoded}' | base64 -d > '{path}'")
+            # 大文件：复用分块写入，避免撞单参数 128KB 上限
+            try:
+                self._write_bytes_via_exec(path, data)
+            except Exception as e:
+                raise IOError(f"Cannot write file: {path} — {e}") from e
 
-        if resp.exit_code != 0:
-            raise IOError(f"Cannot write file: {path} — {resp.output}")
         return f"OK: {path}"
 
     def list_dir(self, path: str = ".") -> list[str]:
@@ -350,8 +376,13 @@ class CustomOpenSandbox(BaseSandbox):
         results = []
         for path in paths:
             try:
-                resp = self.execute(f"base64 '{path}'")
-                if resp.exit_code == 0 and resp.output.strip():
+                resp = self.execute(f"base64 {shlex.quote(path)}")
+                if resp.truncated:
+                    # 截断的 base64 可能解码成半截数据，必须显式报错
+                    results.append(FileDownloadResponse(
+                        path=path, content=None, error="file_too_large",
+                    ))
+                elif resp.exit_code == 0 and resp.output.strip():
                     content = base64.b64decode(resp.output.strip())
                     results.append(FileDownloadResponse(path=path, content=content, error=None))
                 else:

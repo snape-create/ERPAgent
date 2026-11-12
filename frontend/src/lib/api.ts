@@ -1,6 +1,8 @@
 import { Conversation, ChatRequest, ResumeRequest } from "./types";
 
-const BASE_URL = "http://localhost:8000/api";
+// 默认走相对路径 /api，由 next.config.ts 的 rewrites 代理到后端；
+// 需要直连后端时可通过 NEXT_PUBLIC_API_BASE 覆盖。
+const BASE_URL = process.env.NEXT_PUBLIC_API_BASE ?? "/api";
 
 // ===== 对话 API =====
 export async function streamChat(

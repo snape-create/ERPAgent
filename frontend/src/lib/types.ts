@@ -1,4 +1,11 @@
 // ===== SSE 事件类型 =====
+export type HarnessPhase =
+  | "idle"
+  | "thinking"
+  | "planning"
+  | "executing"
+  | "reviewing"
+  | "done";
 export interface SSETokenEvent {
   type: "token";
   content: string;
@@ -20,6 +27,9 @@ export interface SSEToolResultEvent {
   type: "tool_result";
   name: string;
   content: string;
+  // 后端可能携带工具调用 id；缺省时前端退化为按当前运行实例 / name 匹配
+
+  id?: string;
 }
 
 export interface SSEToolEndEvent {
@@ -138,8 +148,10 @@ export interface ResumeRequest {
 }
 
 // ===== 功能卡片 =====
+export type CapabilityIcon = "chart" | "cart" | "box" | "search";
+
 export interface CapabilityCard {
-  icon: string;
+  icon: CapabilityIcon;
   title: string;
   description: string;
   prompt: string;

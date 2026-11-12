@@ -9,20 +9,19 @@ interface Props {
 
 export default function SearchBox({ value, onChange }: Props) {
   return (
-    <div className="px-4 mb-3">
-      <div className="relative">
-        <Search
-          size={14}
-          className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
-        />
-        <input
-          type="text"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder="搜索对话..."
-          className="w-full pl-9 pr-3 py-2 text-sm bg-white border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-colors"
-        />
-      </div>
+    <div className="relative">
+      <Search
+        size={14}
+        strokeWidth={1.5}
+        className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-3 pointer-events-none"
+      />
+      <input
+        type="search"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="搜索会话"
+        className="w-full h-8 pl-8 pr-2.5 text-[13px] bg-surface border border-hairline rounded-ctl text-ink placeholder:text-ink-3 focus:outline-none focus:border-accent/50 focus:ring-2 focus:ring-accent/15 transition-[border-color,box-shadow] duration-150 ease-quiet"
+      />
     </div>
   );
 }

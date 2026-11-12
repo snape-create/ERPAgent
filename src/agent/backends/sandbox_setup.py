@@ -19,10 +19,8 @@ from typing import Optional
 
 from .custom_opensandbox import CustomOpenSandbox
 from ..log_utils import sandbox_logger
-from ..config import SANDBOX_WORK_DIR, SANDBOX_IMAGE
-
-# 项目根目录（用于定位本地文件同步到沙箱）
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+from ..config import SANDBOX_WORK_DIR, SANDBOX_IMAGE, SANDBOX_CONTAINER
+from ..env_utils import PROJECT_ROOT
 
 
 # ============================================================
@@ -38,19 +36,19 @@ class SandboxConfig:
     name: str = "erp-sandbox"
     work_dir: str = SANDBOX_WORK_DIR
 
-    # --- 安全防护 ---
-    read_only: bool = True
-    memory_limit: str = "512m"
-    cpu_limit: float = 1.0
-    network_mode: str = "bridge"          # "none" = 完全隔离, "bridge" = 受限
-    tmpfs_size: str = "128m"
-    drop_all_caps: bool = True
-    use_seccomp: bool = True
-    seccomp_path: str = ""                # 空则使用内置 seccomp.json
+    # --- 安全防护（默认值来自 config/sandbox_config.toml [sandbox.container]）---
+    read_only: bool = SANDBOX_CONTAINER["read_only"]
+    memory_limit: str = SANDBOX_CONTAINER["memory_limit"]
+    cpu_limit: float = SANDBOX_CONTAINER["cpu_limit"]
+    network_mode: str = SANDBOX_CONTAINER["network_mode"]
+    tmpfs_size: str = SANDBOX_CONTAINER["tmpfs_size"]
+    drop_all_caps: bool = SANDBOX_CONTAINER["drop_all_caps"]
+    use_seccomp: bool = SANDBOX_CONTAINER["use_seccomp"]
+    seccomp_path: str = SANDBOX_CONTAINER["seccomp_path"]
 
     # --- 多语言运行时 ---
     # 指定需要安装的运行时列表: ["python", "go", "node"]
-    runtimes: list[str] = field(default_factory=lambda: ["python"])
+    runtimes: list[str] = field(default_factory=lambda: list(SANDBOX_CONTAINER["runtimes"]))
 
     # --- 环境变量注入 ---
     env_vars: dict[str, str] = field(default_factory=dict)

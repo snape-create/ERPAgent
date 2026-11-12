@@ -153,7 +153,7 @@ def _extract_supplier_names(text: str) -> List[str]:
 
 
 def _collect_tool_entities(messages: Sequence[Any]) -> Dict[str, List[str]]:
-    """从工具调用参数里收集实体（供应商、零部件），比正则稳。
+    """从工具调用参数里收集实体（供应商、零部件）。
 
     判定规则（按优先级）：
     1. 工具名含 supplier / 参数名含 supplier → 供应商

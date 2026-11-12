@@ -93,9 +93,40 @@ function restoreMath(md: string, blocks: string[]): string {
   );
 }
 
-/** 表格单元格里混入的标题标记：`| ## 三种主流变体 |` -> `| 三种主流变体 |` */
+/**
+ * 表格单元格里混入的标题标记：`| ## 三种主流变体 |` -> `| 三种主流变体 |`
+ *
+ * 也要处理标题写在单元格中间的情况：`| 库存 ### 单位 |` -> `| 库存 单位 |`。
+ * 单元格中间的单个 `#` 多半是编号（如 `#3`），只剥两个及以上。
+ */
 function stripHeadingInCells(line: string): string {
-  return line.replace(/(\|[ \t]*)#{1,6}[ \t]*/g, "$1");
+  return line
+    .split("|")
+    .map((cell) =>
+      cell
+        .replace(/^[ \t]*#{1,6}[ \t]*/, "")
+        .replace(/([ \t])#{2,6}[ \t]*/g, "$1")
+    )
+    .join("|");
+}
+
+/**
+ * 标题被挤到表格行开头：`### 结论五：...2915元| 供应商 | 金额 |`
+ *
+ * 这一行含 `|`，会被当成表格行整行跳过归一化；GFM 又不在单元格里解析标题，
+ * 于是 `###` 原样显示在表头第一格。这里把标题部分拆回独立一行。
+ *
+ * 返回值：heading 为 null 表示不是这种写法，为 "" 表示只有标记没有文字。
+ */
+function splitLeadingHeading(line: string): { heading: string | null; row: string } {
+  const match = line.match(/^[ \t]*(#{1,6})[ \t]*(.*?)[ \t]*(?=\|)/);
+  if (!match) return { heading: null, row: line };
+
+  const text = match[2].trim();
+  const row = line.slice(match[0].length);
+  if (!row.includes("|")) return { heading: null, row: line };
+
+  return { heading: text ? `${match[1]} ${text}` : "", row };
 }
 
 /**
@@ -162,6 +193,19 @@ function normalizeLine(line: string): string {
     "$1\n$2 $3"
   );
 
+  // 4.1 裸 URL 后紧跟列表项/标题时拆行：`.../a.png-图2...` -> `.../a.png\n\n- 图2...`
+  //     如果多个下载链接用 `-` 拼在同一行，GFM 的 autolink 会把整串识别成
+  //     一个 URL，点击后请求不存在的文件。只匹配常见文件后缀，避免误伤
+  //     普通 URL 中恰好出现的 `-中文`。
+  s = s.replace(
+    /(https?:\/\/[^\s<>"'`]+?\.(?:png|jpe?g|gif|webp|svg|bmp|pdf|csv|xlsx?|docx?|pptx?|md|html?|json|txt))-(?=[\u4e00-\u9fff])/gi,
+    "$1\n\n- "
+  );
+  s = s.replace(
+    /(https?:\/\/[^\s<>"'`]+?\.(?:png|jpe?g|gif|webp|svg|bmp|pdf|csv|xlsx?|docx?|pptx?|md|html?|json|txt))(#{1,6})(?=[\u4e00-\u9fff])/gi,
+    "$1\n\n$2 "
+  );
+
   // 5. 拆出被文字夹住的水平分割线：`Skill---` -> `Skill\n\n---`
   //    `|` 与 `-` 出现在首尾字符时一律跳过，避免再次切开表格分隔行
   s = s.replace(/([^\n|-])-{3,}([^\n|-])/g, "$1\n\n---\n\n$2");
@@ -218,7 +262,19 @@ export function normalizeMarkdown(md: string): string {
     }
 
     if (isTableLine(raw)) {
-      tableBuffer.push(raw);
+      const { heading, row } = splitLeadingHeading(raw);
+      if (heading) {
+        // 标题独占一行，表格从 `|` 开始重新起一段
+        flushTable();
+        out.push(heading);
+        out.push("");
+        tableBuffer.push(row);
+      } else if (heading === "") {
+        // 只有 `###` 没有文字，丢掉标记
+        tableBuffer.push(row);
+      } else {
+        tableBuffer.push(raw);
+      }
       continue;
     }
 
