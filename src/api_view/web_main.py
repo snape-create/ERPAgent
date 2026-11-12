@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse
 
 from .api.chat import router as chat_router
 from .api.history import router as history_router
+from .api.mcp import router as mcp_router
 from .web_config import close_mongo_client
 from ..agent.log_utils import web_logger
 from ..agent.backends.sandbox_manager import sandbox_manager
@@ -38,12 +39,23 @@ async def _sandbox_maintenance(stop_event: asyncio.Event) -> None:
         except Exception as exc:
             web_logger.warning(f"Sandbox maintenance iteration failed: {exc}")
 
-        try:
-            await asyncio.wait_for(
-                stop_event.wait(), timeout=SANDBOX_MAINTENANCE_INTERVAL_SECONDS
-            )
-        except TimeoutError:
-            pass
+
+async def _warm_default_agent() -> None:
+    """后台预热默认用户 Agent（含 MCP 工具加载），不阻塞 Web 启动。
+
+    - 预热完成后 default_user 首条消息零等待（session 已构建）；
+    - MCP 工具缓存是全局共享的，预热后其他用户首次请求也能命中缓存；
+    - 预热失败只记 warning，首请求仍会按需构建（现有逻辑兜底）。
+    """
+    try:
+        from .agent_loader import agent_loader
+
+        await agent_loader.initialize("default_user")
+        web_logger.info("Default user agent warmed up (MCP tools loaded)")
+    except Exception as e:
+        web_logger.warning(
+            f"Agent warmup failed, will build on first request: {e}"
+        )
 
 
 @asynccontextmanager
@@ -52,11 +64,16 @@ async def lifespan(app: FastAPI):
     web_logger.info("Starting ERP Agent Web Server...")
     stop_event = asyncio.Event()
     maintenance_task = None
+    warmup_task = None
     try:
         # 预热失败不阻止 Web 服务启动；首个请求仍会按需创建并回退到 LocalShell。
         await asyncio.to_thread(sandbox_manager.ensure_warm_pool)
         maintenance_task = asyncio.create_task(
             _sandbox_maintenance(stop_event), name="sandbox-maintenance"
+        )
+        # 后台预热默认用户 Agent：提前完成 MCP 加载，首条消息不等待。
+        warmup_task = asyncio.create_task(
+            _warm_default_agent(), name="agent-warmup"
         )
         yield
     finally:
@@ -66,6 +83,10 @@ async def lifespan(app: FastAPI):
             maintenance_task.cancel()
             with suppress(asyncio.CancelledError):
                 await maintenance_task
+        if warmup_task is not None:
+            warmup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await warmup_task
         # 不销毁已认领容器：Manager 会把 user → container 映射持久化，重启后可恢复。
         await close_mongo_client()
         from ..agent.observability import shutdown
@@ -91,6 +112,7 @@ app.add_middleware(
 # 注册路由
 app.include_router(chat_router)
 app.include_router(history_router)
+app.include_router(mcp_router)
 
 # 文件下载目录（图表等生成文件）
 DOWNLOAD_DIR = Path(__file__).resolve().parent.parent / "download"

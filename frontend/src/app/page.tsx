@@ -76,6 +76,14 @@ export default function Home() {
     chat.resumeWith({ decisions: [{ type: "reject" }] });
   }, [chat]);
 
+  const handleEdit = useCallback(
+    (args: Record<string, unknown>, toolName: string) => {
+      // 后端据此补出框架要求的 edited_action，并把参数包回 order_data
+      chat.resumeWith({ decisions: [{ type: "edit", tool_name: toolName, args }] });
+    },
+    [chat]
+  );
+
   return (
     <div className="flex h-dvh overflow-hidden bg-paper">
       <Sidebar
@@ -107,6 +115,7 @@ export default function Home() {
         onSupplement={handleSupplement}
         onApprove={handleApprove}
         onReject={handleReject}
+        onEdit={handleEdit}
       />
     </div>
   );

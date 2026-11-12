@@ -28,16 +28,19 @@ async def test_chart_generator():
     print("    ✓ chart_generator 正常\n")
 
 
-async def test_web_search():
-    """测试Web搜索工具"""
-    print("[2] 测试 web_search...")
-    from agent.tools.web_search import web_search
+async def test_bing_search():
+    """测试 bing 网络搜索工具（MCP）"""
+    print("[2] 测试 bing 网络搜索...")
+    from agent.tools.mcp_client import load_mcp_tools_sync
 
-    result = await web_search.ainvoke({
-        "query": "摩托车零部件采购管理"
-    })
+    tools = load_mcp_tools_sync()
+    bing_tool = next((t for t in tools if "bing_search" in t.name), None)
+    if not bing_tool:
+        print("    ⚠ 未找到 bing_search 工具（config/mcp.json 未加载）")
+        return
+    result = await bing_tool.ainvoke({"query": "摩托车零部件采购管理"})
     print(f"    结果: {str(result)[:200]}")
-    print("    ✓ web_search 正常\n")
+    print("    ✓ bing 网络搜索正常\n")
 
 
 async def test_mcp_tools():
@@ -103,9 +106,9 @@ async def main():
         print(f"    ⚠ chart_generator 测试跳过: {e}\n")
 
     try:
-        await test_web_search()
+        await test_bing_search()
     except Exception as e:
-        print(f"    ⚠ web_search 测试跳过: {e}\n")
+        print(f"    ⚠ bing 搜索测试跳过: {e}\n")
 
     await test_mcp_tools()
 

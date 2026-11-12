@@ -149,8 +149,11 @@ export function useChat() {
           // 归一化：interrupt_type 可能出现在事件顶层、data 内，
           // 甚至被后端写成 type / action_type，这里统一收敛到 interrupt_type，
           // 保证 InterruptBanner 一定能识别出类型（否则界面会静默空白）
-          const rawData = (event.data ?? {}) as InterruptData &
-            Record<string, unknown>;
+          // 后端把审批字段平铺在事件里（tool_name / order_data ...），并没有
+          // 包一层 data；只读 event.data 会拿到空对象，审批卡片于是只剩标题。
+          const rawData = (
+            event.data && typeof event.data === "object" ? event.data : event
+          ) as InterruptData & Record<string, unknown>;
           const type =
             rawData.interrupt_type ??
             (rawData.type as string | undefined) ??

@@ -25,9 +25,14 @@ class ChatInterruptTests(unittest.IsolatedAsyncioTestCase):
         return [(c.split('\n')[0][7:],json.loads(c.split('\n')[1][6:])) for c in chunks]
 
     async def test_modern_approval_interrupt(self):
-        actions=[{'name':'order_create','args':{'order_data':'{}'}}]
+        actions=[{'name':'order_create','args':{'orderNumber':'PO1','orderDetail':[{'partId':1,'quantity':2,'unitPrice':3.5}]},'description':'创建采购订单'}]
         events=await self.run_stream('__interrupt__',{'action_requests':actions})
-        self.assertEqual([v for k,v in events if k=='interrupt'][0]['order_data'],actions)
+        payload=[v for k,v in events if k=='interrupt'][0]
+        # action_requests 会被拍平成可渲染字段，前端审批卡片据此画出单据
+        self.assertEqual(payload['tool_name'],'order_create')
+        self.assertEqual(payload['tool_description'],'创建采购订单')
+        self.assertEqual(payload['order_data']['orderNumber'],'PO1')
+        self.assertEqual(payload['action_count'],1)
         self.assertTrue(events[-1][1]['interrupted'])
 
     async def test_legacy_interrupt(self):

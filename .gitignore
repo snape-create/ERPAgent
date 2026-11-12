@@ -42,3 +42,4 @@ src/download/
 .DS_Store
 Thumbs.db
 learn-note/
+config/mcp.json

@@ -42,6 +42,6 @@ python /skills/procurement/web-content-fetcher/fetcher.py --url <target_url> --o
 - markdownify
 
 ## 配合使用
-1. 先用 `web_search` 找到目标URL
+1. 先用 `bing_search` 找到目标URL
 2. 用本技能转换为Markdown
 3. Agent直接阅读Markdown内容进行分析

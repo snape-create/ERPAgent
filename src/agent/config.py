@@ -149,7 +149,11 @@ MAX_TOOL_CALLS = get_env_int("MAX_TOOL_CALLS", 30)
 SUMMARIZATION_THRESHOLD = 0.85  # 85% 上下文窗口时触发摘要
 
 # ============ 中断配置 ============
+# edit 允许用户在审批卡片里直接改参数后提交，避免再回到模型重跑一轮
 INTERRUPT_ON_TOOLS = {
-    "order_create": {"allowed_decisions": ["approve", "reject"]},
-    "order_update": {"allowed_decisions": ["approve", "reject"]},
+    "order_create": {"allowed_decisions": ["approve", "reject", "edit"]},
+    "order_update": {"allowed_decisions": ["approve", "reject", "edit"]},
+    # 状态变更只带 id 和目标状态，改参数没有意义（改错方向不是"编辑"能解决的），
+    # 所以只给批准/拒绝
+    "order_update_status": {"allowed_decisions": ["approve", "reject"]},
 }

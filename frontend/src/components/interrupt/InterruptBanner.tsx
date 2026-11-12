@@ -71,6 +71,7 @@ interface Props {
   onSupplement: (text: string) => void;
   onApprove: () => void;
   onReject: () => void;
+  onEdit: (args: Record<string, unknown>, toolName: string) => void;
 }
 
 export default function InterruptBanner({
@@ -78,13 +79,21 @@ export default function InterruptBanner({
   onSupplement,
   onApprove,
   onReject,
+  onEdit,
 }: Props) {
   if (data.interrupt_type === "order_info_supplement") {
     return <SupplementForm data={data} onSubmit={onSupplement} />;
   }
 
   if (data.interrupt_type === "hitl_approval") {
-    return <ApprovalCard data={data} onApprove={onApprove} onReject={onReject} />;
+    return (
+      <ApprovalCard
+        data={data}
+        onApprove={onApprove}
+        onReject={onReject}
+        onEdit={(args) => onEdit(args, data.tool_name ?? "")}
+      />
+    );
   }
 
   // 未知/缺失类型也要渲染，避免"静默空白"

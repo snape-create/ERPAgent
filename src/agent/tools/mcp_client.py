@@ -8,13 +8,15 @@ MCP 工具加载模块
 - 优雅降级（加载失败时返回空工具列表，Agent 仍可对话）
 """
 import asyncio
+import json
 import time
 from typing import Any, List, Optional
 
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import Field, create_model
 
-from ..config import MCP_TRANSPORT, MCP_URL, MCP_USE_EMBEDDED
+from ..config import MCP_URL, MCP_USE_EMBEDDED
+from ..env_utils import PROJECT_ROOT
 from ..log_utils import mcp_logger
 
 # 重试配置
@@ -26,6 +28,35 @@ RETRY_BACKOFF_FACTOR = 2.0
 _cached_tools: List[BaseTool] | None = None
 _cache_time: float = 0
 CACHE_TTL = 300  # 5分钟缓存
+
+# 额外的 MCP Server 配置（config/mcp.json，多 server 并存）
+CONFIG_MCP_PATH = PROJECT_ROOT / "config" / "mcp.json"
+# config MCP 加载超时（秒）：必须小于 load_mcp_tools_sync 的硬超时
+CONFIG_MCP_TIMEOUT = 60
+# 熔断时间（秒）：config MCP 加载失败后 N 秒内不再尝试，避免反复撞外网
+CONFIG_MCP_COOLDOWN = 300
+_config_mcp_fail_until: float = 0.0
+_config_mcp_lock = asyncio.Lock()
+
+# 内置 ERP MCP（锁定，不允许禁用）
+BUILTIN_MCP_NAME = "erp-builtin"
+BUILTIN_MCP_DESCRIPTION = "ERP 采购管理内置工具（供应商 / 零部件 / 订单 / 库存）"
+
+# 被用户禁用的 config MCP server 名集合（内存态，重启恢复默认=全部启用）
+_disabled_servers: set[str] = set()
+
+
+def _read_config_server_names() -> List[str]:
+    """读取 config/mcp.json 中配置的 server 名（按文件顺序），任何异常返回 []。"""
+    if not CONFIG_MCP_PATH.exists():
+        return []
+    try:
+        with open(CONFIG_MCP_PATH, encoding="utf-8") as f:
+            config = json.load(f)
+        return list((config.get("mcpServers") or {}).keys())
+    except Exception as e:
+        mcp_logger.warning(f"Failed to read config MCP server names: {e}")
+        return []
 
 
 def _json_type_to_python(prop: dict) -> Any:
@@ -110,22 +141,133 @@ async def load_mcp_tools_inprocess(force_refresh: bool = False) -> List[BaseTool
 
 async def _load_mcp_tools_remote(force_refresh: bool = False) -> List[BaseTool]:
     """独立 MCP Server 模式：通过 Streamable HTTP（默认）或 SSE 连接。"""
-    from langchain_mcp_adapters.client import MultiServerMCPClient
+    import warnings
 
-    # langchain-mcp-adapters 的 transport 取值与 FastMCP 略有不同
-    client_transport = "sse" if MCP_TRANSPORT == "sse" else "streamable_http"
+    from langchain.mcp import MCPAdapter
+    from langchain_core._api import LangChainBetaWarning
+
+    # langchain.mcp 是 beta API，导入会触发 LangChainBetaWarning，静默处理
+    warnings.filterwarnings("ignore", category=LangChainBetaWarning)
+
+    mcp_logger.info(f"Connecting to MCP Server: {MCP_URL}")
+    async with MCPAdapter(MCP_URL) as adapter:
+        tools = await adapter.list_tools()
+    # list_tools 返回的工具持有 client 引用，上下文退出后仍可调用
+    return tools
+
+
+def _harden_remote_tool(tool: BaseTool, retries: int = 1) -> BaseTool:
+    """给远端 MCP 工具加调用保护。
+
+    背景：langchain.mcp 的工具每次调用都会重新连接远端（async with client），
+    远端传输层错误（连接断开等）会直接传播，导致整个 agent 流崩溃。
+
+    保护策略：
+    - 调用失败重试 retries 次（远端瞬断常见）；
+    - 重试耗尽后把错误转成文本返回给 LLM（让 LLM 自己重试/解释），
+      而不是让异常传播崩掉整个对话。
+    """
+    async def _safe_call(**kwargs):
+        last_err = None
+        for attempt in range(retries + 1):
+            try:
+                return await tool.ainvoke(kwargs)
+            except Exception as e:
+                last_err = e
+                mcp_logger.warning(
+                    f"Remote MCP tool '{tool.name}' call failed "
+                    f"(attempt {attempt + 1}/{retries + 1}): {str(e)[:100]}"
+                )
+                if attempt < retries:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+        return (
+            f"⚠ 工具 {tool.name} 调用失败（远端 MCP 服务连接异常）："
+            f"{str(last_err)[:150]}。建议告知用户稍后重试。"
+        )
+
+    return StructuredTool.from_function(
+        coroutine=_safe_call,
+        name=tool.name,
+        description=tool.description,
+        args_schema=tool.args_schema,
+    )
+
+
+async def _load_config_mcp_tools_uncached() -> List[BaseTool]:
+    """真正执行 config MCP 加载的内部函数（无缓存/无熔断，只做单次尝试）。"""
+    if not CONFIG_MCP_PATH.exists():
+        return []
+    import warnings
+
+    from langchain.mcp import MCPAdapter
+    from langchain_core._api import LangChainBetaWarning
+
+    # langchain.mcp 是 beta API，导入会触发 LangChainBetaWarning，静默处理
+    warnings.filterwarnings("ignore", category=LangChainBetaWarning)
+
+    with open(CONFIG_MCP_PATH, encoding="utf-8") as f:
+        config = json.load(f)
+    servers = config.get("mcpServers") or {}
+    if not servers:
+        mcp_logger.warning(f"{CONFIG_MCP_PATH} 中没有 mcpServers 配置")
+        return []
+    # 连接前就剔除已禁用的 server，避免为其建立连接（挂起的 server 会拖慢整体加载）
+    active_servers = {
+        n: cfg for n, cfg in servers.items() if n not in _disabled_servers
+    }
+    if not active_servers:
+        return []
+    async with MCPAdapter({"mcpServers": active_servers}) as adapter:
+        tools = await adapter.list_tools()
+    # 每个工具套上错误保护，防止远端断连拖垮整个对话流
+    tools = [_harden_remote_tool(t) for t in tools]
     mcp_logger.info(
-        f"Connecting to MCP Server: {MCP_URL} (transport={client_transport})"
+        f"Loaded {len(tools)} tools from config MCP servers: "
+        f"{[t.name for t in tools]}"
     )
-    client = MultiServerMCPClient(
-        {
-            "erp": {
-                "url": MCP_URL,
-                "transport": client_transport,
-            }
-        }
-    )
-    return await client.get_tools()
+    return tools
+
+
+async def load_config_mcp_tools(force_refresh: bool = False) -> List[BaseTool]:
+    """从 config/mcp.json 加载额外 MCP Server 的工具（多 server 并存）。
+
+    工具名带 server 名前缀（如 bing-cn-mcp-server_bing_search）。
+
+    三层防拖垮保护：
+    1. 超时：单次加载限时 CONFIG_MCP_TIMEOUT 秒，超时返回 []；
+    2. 熔断：失败后 CONFIG_MCP_COOLDOWN 秒内不再尝试连接远端；
+    3. 异常捕获：任何异常都返回 []，绝不向调用方抛错。
+    """
+    global _config_mcp_fail_until
+
+    if not CONFIG_MCP_PATH.exists():
+        return []
+    # 熔断期内直接返回空，不重复撞外网、不重复打日志
+    if not force_refresh and time.time() < _config_mcp_fail_until:
+        return []
+
+    async with _config_mcp_lock:
+        # 拿到锁后再次检查熔断（防止并发场景下多个请求同时去连）
+        if not force_refresh and time.time() < _config_mcp_fail_until:
+            return []
+        try:
+            return await asyncio.wait_for(
+                _load_config_mcp_tools_uncached(), timeout=CONFIG_MCP_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            _config_mcp_fail_until = time.time() + CONFIG_MCP_COOLDOWN
+            mcp_logger.error(
+                f"config MCP 加载超时（>{CONFIG_MCP_TIMEOUT}s），"
+                f"{CONFIG_MCP_COOLDOWN}s 内不再尝试: {CONFIG_MCP_PATH}"
+            )
+            return []
+        except Exception as e:
+            _config_mcp_fail_until = time.time() + CONFIG_MCP_COOLDOWN
+            mcp_logger.error(
+                f"Failed to load config MCP tools from {CONFIG_MCP_PATH}: {e}. "
+                f"{CONFIG_MCP_COOLDOWN}s 内不再尝试"
+            )
+            return []
 
 
 async def load_mcp_tools(force_refresh: bool = False) -> List[BaseTool]:
@@ -149,10 +291,12 @@ async def load_mcp_tools(force_refresh: bool = False) -> List[BaseTool]:
     for attempt in range(MAX_RETRIES):
         try:
             tools = await loader(force_refresh)
-            if tools:
-                _cached_tools = tools
+            config_tools = await load_config_mcp_tools(force_refresh)
+            all_tools = tools + config_tools
+            if all_tools:
+                _cached_tools = all_tools
                 _cache_time = time.time()
-                return tools
+                return all_tools
             mcp_logger.warning("MCP Server returned 0 tools")
             return []
         except Exception as e:
@@ -194,13 +338,80 @@ def load_mcp_tools_sync(force_refresh: bool = False) -> List[BaseTool]:
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(asyncio.run, load_mcp_tools(force_refresh))
-            return future.result(timeout=30)
+            try:
+                return future.result(timeout=90)
+            except concurrent.futures.TimeoutError:
+                mcp_logger.error(
+                    "MCP tools load timed out after 90s, agent will operate "
+                    "without MCP tools"
+                )
+                return []
     else:
         return asyncio.run(load_mcp_tools(force_refresh))
 
 
+def get_mcp_server_states() -> List[dict]:
+    """返回所有 MCP server 的启用状态（内置 ERP + config/mcp.json）。
+
+    每项：{name, description, enabled, locked, tool_count}
+    tool_count 仅在工具已加载（缓存命中）时有值，否则为 0。
+    """
+    config_names = _read_config_server_names()
+    config_prefixes = tuple(f"{n}_" for n in config_names)
+    cached = _cached_tools or []
+
+    builtin_count = len([t for t in cached if not t.name.startswith(config_prefixes)])
+    states = [
+        {
+            "name": BUILTIN_MCP_NAME,
+            "description": BUILTIN_MCP_DESCRIPTION,
+            "enabled": True,
+            "locked": True,
+            "tool_count": builtin_count,
+        }
+    ]
+    for name in config_names:
+        prefix = f"{name}_"
+        states.append(
+            {
+                "name": name,
+                "description": name,
+                "enabled": name not in _disabled_servers,
+                "locked": False,
+                "tool_count": len([t for t in cached if t.name.startswith(prefix)]),
+            }
+        )
+    return states
+
+
+def set_mcp_server_enabled(name: str, enabled: bool) -> None:
+    """启用/禁用某个 config MCP server（内存态）。
+
+    - 内置 ERP server 不允许禁用；
+    - 未知 server 名抛 ValueError；
+    - 切换后重置熔断并清除工具缓存，下次请求会以新工具集合重建 agent。
+    """
+    global _config_mcp_fail_until
+
+    if name == BUILTIN_MCP_NAME:
+        raise ValueError(f"内置 MCP server '{name}' 不允许禁用")
+    known = set(_read_config_server_names())
+    if name not in known:
+        raise ValueError(f"未知的 MCP server: {name}")
+
+    if enabled:
+        _disabled_servers.discard(name)
+    else:
+        _disabled_servers.add(name)
+
+    # 重置熔断（启用时需要能立即重连）并清工具缓存
+    _config_mcp_fail_until = 0.0
+    invalidate_cache()
+    mcp_logger.info(f"MCP server '{name}' {'enabled' if enabled else 'disabled'}")
+
+
 def invalidate_cache():
-    """清除工具缓存（MCP Server 重启后调用）"""
+    """清除工具缓存（MCP Server 重启或 MCP 启停后调用）"""
     global _cached_tools, _cache_time
     _cached_tools = None
     _cache_time = 0

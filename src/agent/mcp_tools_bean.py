@@ -24,7 +24,7 @@ ANALYST_TOOL_PATTERNS = [
     "order_page",
     "order_get",
     "generate_chart",
-    "web_search",
+    "bing",
 ]
 
 # 订单子Agent使用的工具名关键字

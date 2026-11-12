@@ -91,3 +91,41 @@ export async function deleteConversation(threadId: string): Promise<void> {
   });
   if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
 }
+
+// ===== MCP 管理 API =====
+export interface McpServer {
+  name: string;
+  description: string;
+  enabled: boolean;
+  locked: boolean;
+  tool_count: number;
+}
+
+export async function getMcpServers(): Promise<McpServer[]> {
+  const res = await fetch(`${BASE_URL}/mcp/servers`);
+  if (!res.ok) throw new Error(`MCP servers failed: ${res.status}`);
+  const data = await res.json();
+  return data.servers ?? [];
+}
+
+export async function toggleMcpServer(
+  name: string,
+  enabled: boolean
+): Promise<string> {
+  const res = await fetch(`${BASE_URL}/mcp/servers/${name}/toggle`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) {
+    let detail = `${res.status}`;
+    try {
+      detail = (await res.json()).detail ?? detail;
+    } catch {
+      // ignore
+    }
+    throw new Error(detail);
+  }
+  const data = await res.json();
+  return data.message ?? "已应用";
+}

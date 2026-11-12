@@ -5,6 +5,7 @@ import Logo from "./Logo";
 import NewChatButton from "./NewChatButton";
 import SearchBox from "./SearchBox";
 import HistoryList from "./HistoryList";
+import McpPanel from "@/components/mcp/McpPanel";
 
 interface Props {
   conversations: Conversation[];
@@ -81,7 +82,9 @@ export default function Sidebar({
           onDelete={onDeleteThread}
         />
 
-        <div className="px-4 py-3 border-t border-hairline">
+        <McpPanel />
+
+        <div className="px-4 py-3">
           <span className="font-mono text-[11px] text-ink-3">ERP Agent · v1.0.0</span>
         </div>
       </aside>

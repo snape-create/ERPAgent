@@ -29,6 +29,119 @@ def sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def unwrap_order_args(args: dict) -> dict:
+    """把 ``{"order_data": "<json 字符串>"}`` 摊平成单据字段。
+
+    MCP 的 order_create / order_update 签名是 ``order_data: str``，模型实际传的
+    是 JSON 字符串。不拆开的话审批卡片只能拿到一个字符串字段，既画不出明细表，
+    也判断不出这是订单类写操作。解析失败时原样返回，卡片退化成键值表。
+    """
+    raw = args.get("order_data")
+    if not isinstance(raw, str) or not raw.lstrip().startswith("{"):
+        return args
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return args
+    if not isinstance(parsed, dict):
+        return args
+    # order_update 的 args 还带 id，保留其它键，单据字段覆盖到顶层
+    merged = {key: value for key, value in args.items() if key != "order_data"}
+    merged.update(parsed)
+    return merged
+
+
+def normalize_edit_decisions(decisions: list) -> list:
+    """把前端「改完参数再提交」的 edit 决策翻译成框架要求的形状。
+
+    前端只发 ``{"type": "edit", "tool_name": ..., "args": {...}}``；LangGraph 的
+    HumanInTheLoop 要求 ``edited_action`` 包裹，且工具名被 Literal 钉死。另外
+    order_* 工具的参数外层必须是 ``{"order_data": "<json 字符串>"}``，否则工具
+    拿到的是散字段，会直接报参数错误。
+    """
+    normalized = []
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            continue
+        if decision.get("type") != "edit" or "edited_action" in decision:
+            normalized.append(decision)
+            continue
+
+        tool_name = decision.get("tool_name") or ""
+        args = decision.get("args")
+        if not isinstance(args, dict):
+            args = {}
+        if tool_name in ("order_create", "order_update"):
+            args = {"order_data": json.dumps(args, ensure_ascii=False)}
+        normalized.append({
+            "type": "edit",
+            "edited_action": {"name": tool_name, "args": args},
+        })
+    return normalized
+
+
+def flatten_hitl_actions(interrupt_value: dict) -> dict:
+    """把 HITL 中断的 action_requests 拍平成前端可直接渲染的结构。
+
+    LangGraph 的 action_requests 形如
+    ``[{"name": "order_create", "args": {...}, "description": "..."}]``，
+    整体塞给前端会让 Object.entries() 只能拿到数组下标，卡片渲染不出单据内容。
+    这里取第一条动作把 args 提到顶层；一次中断含多个动作时保留数量供前端提示。
+    """
+    raw = interrupt_value.get("action_requests")
+    if isinstance(raw, dict):
+        actions = [raw]
+    elif isinstance(raw, list):
+        actions = [item for item in raw if isinstance(item, dict)]
+    else:
+        actions = []
+
+    first = actions[0] if actions else {}
+    args = first.get("args")
+    if not isinstance(args, dict):
+        args = {}
+    args = unwrap_order_args(args)
+    return {
+        "tool_name": first.get("name") or interrupt_value.get("tool_name", ""),
+        "tool_description": first.get("description", ""),
+        "tool_args": args,
+        "order_data": args,
+        "action_count": len(actions),
+    }
+
+
+ORDER_STATUS_NAMES = {0: "待审核", 1: "已审核", 2: "已发货", 3: "已收货", 4: "已完成"}
+
+
+async def enrich_status_change(payload: dict) -> dict:
+    """状态变更的审批卡片需要「当前 → 目标」，否则用户看不出是前进还是回退。
+
+    只对 order_update_status 生效。读取失败时保持原样，前端会降级成只显示目标状态。
+    """
+    if payload.get("tool_name") != "order_update_status":
+        return payload
+
+    args = payload.get("tool_args") or {}
+    order_id = args.get("id")
+    if order_id is None:
+        return payload
+
+    try:
+        from ...mcp_server.http_base import erp_client
+
+        current = await erp_client.get(f"/api/orders/get/{order_id}")
+        order = current.get("data") if isinstance(current.get("data"), dict) else current
+        if not isinstance(order, dict) or order.get("status") is None:
+            return payload
+        payload["order_number"] = order.get("orderNumber")
+        payload["current_status"] = order.get("status")
+        payload["current_status_label"] = ORDER_STATUS_NAMES.get(order.get("status"))
+        payload["target_status_label"] = ORDER_STATUS_NAMES.get(args.get("status"))
+    except Exception as exc:
+        web_logger.warning(f"Failed to enrich status change interrupt: {exc}")
+    return payload
+
+
 # Harness 阶段 → 前端展示文案
 PHASE_LABELS = {
     "planning": "📝 规划中",
@@ -68,18 +181,27 @@ async def stream_chat_response(
     config = traced_config(agent_loader.create_config(thread_id, user_id))
     if resume_data is not None:
         decisions = resume_data.get('decisions', []) if isinstance(resume_data, dict) else []
-        event('hitl.resume', approved=any(d.get('type')=='approve' for d in decisions if isinstance(d,dict)),
+        event('hitl.resume', approved=any(d.get('type') in ('approve','edit') for d in decisions if isinstance(d,dict)),
               rejected=any(d.get('type')=='reject' for d in decisions if isinstance(d,dict)))
 
     # 加载已有消息（恢复场景）或初始化
     if resume_data:
         display_messages = await agent_loader.get_display_messages(thread_id)
         decisions = resume_data.get("decisions", []) if isinstance(resume_data, dict) else []
+        # edit 同样表示人已确认，只是提交前改了参数；否则会被当成"未授权"阻断写操作
         approved = any(
-            isinstance(d, dict) and d.get("type") == "approve" for d in decisions
+            isinstance(d, dict) and d.get("type") in ("approve", "edit")
+            for d in decisions
         )
+        # 前端的 edit 只带散参数，这里补成框架要求的 edited_action 再交给图
+        resume_value = resume_data
+        if isinstance(resume_data, dict) and isinstance(resume_data.get("decisions"), list):
+            resume_value = {
+                **resume_data,
+                "decisions": normalize_edit_decisions(resume_data["decisions"]),
+            }
         current_input = Command(
-            resume=resume_data,
+            resume=resume_value,
             update={"_human_approved": approved},
         )
     else:
@@ -95,6 +217,9 @@ async def stream_chat_response(
     # 当前助手消息累积缓冲
     assistant_content = ""
     tool_calls_buffer = []
+    # 工具调用之后模型会开一段新文本，两段之间没有分隔符就会连成
+    # "……定位零件。✅ 已获取数据" 这种一句话。这里记一笔，续写前补空行。
+    pending_separator = False
     thinking_emitted = False
     phase = "thinking"
     last_phase = "thinking"
@@ -190,12 +315,13 @@ async def stream_chat_response(
                                         "message": interrupt_value.get("message", ""),
                                         "extracted_data": interrupt_value.get("current_data", {}),
                                     })
-                                elif "action_requests" in interrupt_value:
+                                elif interrupt_value.get("action_requests"):
+                                    payload = await enrich_status_change(
+                                        flatten_hitl_actions(interrupt_value)
+                                    )
                                     yield sse_event("interrupt", {
                                         "interrupt_type": "hitl_approval",
-                                        "tool_name": interrupt_value.get("tool_name", ""),
-                                        "tool_args": interrupt_value.get("action_requests", {}),
-                                        "order_data": interrupt_value.get("action_requests", {}),
+                                        **payload,
                                     })
                                 else:
                                     # 通用中断（interrupt_on 触发的审批）
@@ -331,6 +457,8 @@ async def stream_chat_response(
                     yield sse_event("tool_end", {
                         "id": getattr(token, "tool_call_id", ""),
                     })
+                    # 工具跑完，模型接下来这段是新的一段话
+                    pending_separator = True
                     continue
 
                 # AIMessage 纯文本 → token 事件
@@ -344,17 +472,26 @@ async def stream_chat_response(
                 )
                 is_ai_text = token_type in ("ai", "AIMessageChunk")
 
+                # 纯空白分片必须原样透传：流式输出时 "\n\n" 经常单独成一个 chunk，
+                # 以前用 content.strip() 过滤会把它整块丢掉，导致入库和前端都出现
+                # 标题粘连正文、列表项挤成一行、表格贴着上一段（历史消息同样受损）。
                 if (
                     is_ai_text
                     and not is_internal
-                    and content
                     and isinstance(content, str)
-                    and content.strip()
+                    and content != ""
                 ):
-                    # 首次收到 token 时结束 thinking
-                    if not thinking_emitted:
+                    # 只有出现可见字符才结束 thinking，纯换行不应让"思考中"提前消失
+                    if content.strip() and not thinking_emitted:
                         yield sse_event("thinking", {"status": "end"})
                         thinking_emitted = True
+                    if pending_separator and content.strip():
+                        # 上一段是工具调用前的说明文字，这里补空行另起一段，
+                        # 否则会出现"……定位零件。✅ 已获取数据"这种粘连
+                        if assistant_content and not assistant_content.endswith("\n") \
+                                and not content.startswith("\n"):
+                            content = "\n\n" + content
+                        pending_separator = False
                     assistant_content += content
 
                     # 判断来源（通过 namespace 元组）

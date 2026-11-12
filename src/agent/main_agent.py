@@ -205,7 +205,7 @@ def create_main_agent(
     组装顺序（严格遵循文档）：
     1. LLM（DeepSeek）
     2. CompositeBackend 三层路由（default=sandbox, /memories/=Store, /persisted-skills/=Store）
-    3. 工具加载（MCP + chart + web_search + hitl）
+    3. 工具加载（MCP + chart + hitl）
     4. 子Agent配置（YAML声明式）
     5. 中间件栈（7自定义 + 框架内置）
     6. 创建 Agent
@@ -273,7 +273,6 @@ def create_main_agent(
     # ===== 3. 加载工具 =====
     from .tools.mcp_client import load_mcp_tools_sync
     from .tools.chart_generator import generate_chart
-    from .tools.web_search import web_search
     from .tools.web_fetch import web_fetch, install_skill
     from .tools.skill_management import list_user_skills
     from .tools.hitl_tools import request_order_info
@@ -281,7 +280,7 @@ def create_main_agent(
     from .tools.document_generator import generate_document, generate_table_report
 
     mcp_tools = load_mcp_tools_sync()
-    custom_tools = [generate_chart, web_search, web_fetch, install_skill, list_user_skills, request_order_info,
+    custom_tools = [generate_chart, web_fetch, install_skill, list_user_skills, request_order_info,
                     download_sandbox_file, list_sandbox_files,
                     generate_document, generate_table_report]
 

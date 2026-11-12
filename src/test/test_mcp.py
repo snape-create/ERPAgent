@@ -14,23 +14,21 @@ load_env()
 
 async def test_mcp_connection():
     """测试 MCP Server 连接和工具调用"""
-    from langchain_mcp_adapters.client import MultiServerMCPClient
+    import warnings
+
+    from langchain.mcp import MCPAdapter
+    from langchain_core._api import LangChainBetaWarning
+
+    # langchain.mcp 是 beta API，导入会触发 LangChainBetaWarning，静默处理
+    warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 
     mcp_url = os.getenv("MCP_SERVER_URL", "http://localhost:9000")
     transport = os.getenv("MCP_TRANSPORT", "streamable-http").strip().lower()
-    client_transport = "sse" if transport == "sse" else "streamable_http"
     path = "/sse" if transport == "sse" else "/mcp"
-    print(f"[1] 连接 MCP Server: {mcp_url}{path} (transport={client_transport})")
+    print(f"[1] 连接 MCP Server: {mcp_url}{path} (transport={transport})")
 
-    client = MultiServerMCPClient({
-        "erp": {
-            "url": f"{mcp_url}{path}",
-            "transport": client_transport,
-        }
-    })
-
-    try:
-        tools = await client.get_tools()
+    async with MCPAdapter(f"{mcp_url}{path}") as adapter:
+        tools = await adapter.list_tools()
         print(f"[2] 获取到 {len(tools)} 个工具:")
         for t in tools:
             print(f"    - {t.name}: {t.description[:50]}...")
@@ -63,9 +61,6 @@ async def test_mcp_connection():
             print("    ⚠ 未找到 part 工具")
 
         print("\n✓ MCP 测试完成")
-
-    finally:
-        await client.close()
 
 
 if __name__ == "__main__":

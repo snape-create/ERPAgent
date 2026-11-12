@@ -143,6 +143,20 @@ class AgentLoader:
         """供请求级工具上下文读取的共享 Store。"""
         return self._store
 
+    def invalidate_sessions(self) -> int:
+        """清除所有用户缓存的 agent session（不销毁沙箱）。
+
+        MCP 启停后调用：下一条消息会以新工具集合重建 agent。
+        Returns: 被清除的会话数
+        """
+        count = len(self._sessions)
+        self._sessions.clear()
+        self._session_build_locks.clear()
+        # 兼容字段
+        self.agent = None
+        web_logger.info(f"Cleared {count} cached agent sessions (MCP config changed)")
+        return count
+
     def create_config(self, thread_id: str, user_id: str = "default_user") -> dict:
         """创建 LangGraph 运行配置"""
         return {

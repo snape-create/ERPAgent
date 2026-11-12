@@ -25,7 +25,7 @@
 
 ### 自定义工具
 - `generate_chart`: 生成可视化图表（26种类型）
-- `web_search`: 网络搜索
+- `bing_search`: 网络搜索（必应中文，MCP 工具）
 - `request_order_info`: 向用户请求订单补充信息
 
 ## 子Agent委派模板

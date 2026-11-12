@@ -18,7 +18,7 @@ tools:
   - order_statistics
   - order_page
   - generate_chart
-  - web_search
+  - bing_search
 
 # ===== 上下文传递协议 =====
 # 定义主Agent委派任务时传递的上下文结构，以及子Agent返回结果的格式

@@ -8,6 +8,20 @@ from fastmcp import FastMCP
 from ..http_base import erp_client
 
 
+# 订单状态：0=待审核,1=已审核,2=已发货,3=已收货,4=已完成
+ORDER_STATUS_NAMES = {0: "待审核", 1: "已审核", 2: "已发货", 3: "已收货", 4: "已完成"}
+# 只允许按流程前进一格；不允许跳跃，也不允许回退
+ORDER_STATUS_FLOW = {0: 1, 1: 2, 2: 3, 3: 4}
+
+
+def _order_status_name(status) -> str:
+    return ORDER_STATUS_NAMES.get(status, f"未知状态({status})")
+
+
+def _error(code: int, message: str) -> str:
+    return json.dumps({"code": code, "message": message, "data": None}, ensure_ascii=False)
+
+
 def register_order_tools(mcp: FastMCP):
     """注册采购订单管理工具到 MCP Server"""
 
@@ -155,13 +169,54 @@ def register_order_tools(mcp: FastMCP):
     async def order_update_status(id: int, status: int) -> str:
         """更新订单状态。
 
+        只能按流程前进一格：待审核 → 已审核 → 已发货 → 已收货 → 已完成。
+        跳跃（如待审核直接到已收货）和回退都会被拒绝，需要按正常业务步骤处理。
+
         Args:
             id: 订单ID
-            status: 新状态：0=待审核,1=已审核,2=已发货,3=已收货,4=已完成
+            status: 目标状态：0=待审核,1=已审核,2=已发货,3=已收货,4=已完成
 
         Returns:
             操作结果JSON
         """
+        if status not in ORDER_STATUS_NAMES:
+            return _error(400, f"非法状态值 {status}，只支持 0-4")
+
+        current = await erp_client.get(f"/api/orders/get/{id}")
+        if not isinstance(current, dict):
+            return _error(502, "读取订单失败：返回内容不是 JSON 对象")
+        if current.get("code") not in (None, 200):
+            return _error(
+                int(current.get("code") or 502),
+                f"读取订单失败：{current.get('message') or '未知错误'}",
+            )
+
+        order = current.get("data") if isinstance(current.get("data"), dict) else current
+        current_status = order.get("status")
+        if current_status is None:
+            return _error(502, "读取订单失败：响应中缺少 status 字段")
+
+        if current_status == status:
+            return json.dumps({
+                "code": 200,
+                "message": f"订单已处于{_order_status_name(status)}，无需变更",
+                "data": order,
+            }, ensure_ascii=False, indent=2)
+
+        expected = ORDER_STATUS_FLOW.get(current_status)
+        if expected is None:
+            return _error(
+                409,
+                f"订单已处于终态（{_order_status_name(current_status)}），不能再变更状态",
+            )
+        if status != expected:
+            return _error(
+                409,
+                f"状态只能逐步前进：当前为{_order_status_name(current_status)}，"
+                f"下一步只能是{_order_status_name(expected)}，"
+                f"不能直接变更到{_order_status_name(status)}",
+            )
+
         result = await erp_client.patch(
             f"/api/orders/update-status/{id}", params={"status": status}
         )

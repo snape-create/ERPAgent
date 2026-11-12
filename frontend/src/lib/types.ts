@@ -94,6 +94,14 @@ export interface InterruptData {
   order_data?: Record<string, unknown>;
   tool_name?: string;
   tool_args?: Record<string, unknown>;
+  tool_description?: string;
+  /** 一次中断里包含的写操作数量，>1 时提示用户逐条核对 */
+  action_count?: number;
+  /** order_update_status 专用：后端补查的当前状态，用于展示「当前 → 目标」 */
+  current_status?: number | null;
+  current_status_label?: string;
+  target_status_label?: string;
+  order_number?: string;
 }
 
 // ===== 消息类型 =====

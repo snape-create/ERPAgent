@@ -29,6 +29,7 @@ interface Props {
   onSupplement: (text: string) => void;
   onApprove: () => void;
   onReject: () => void;
+  onEdit: (args: Record<string, unknown>, toolName: string) => void;
 }
 
 export default function ChatArea({
@@ -49,6 +50,7 @@ export default function ChatArea({
   onSupplement,
   onApprove,
   onReject,
+  onEdit,
 }: Props) {
   const [showToolCalls, setShowToolCalls] = useState(true);
   const hasMessages = messages.length > 0;
@@ -115,6 +117,7 @@ export default function ChatArea({
           onSupplement={onSupplement}
           onApprove={onApprove}
           onReject={onReject}
+          onEdit={onEdit}
         />
       )}
 
