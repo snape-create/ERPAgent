@@ -54,8 +54,6 @@ export default function ChatArea({
 }: Props) {
   const [showToolCalls, setShowToolCalls] = useState(true);
   const hasMessages = messages.length > 0;
-  // 这个会话里真的出现过工具调用时才显示开关，否则拨它没有任何可见效果
-  const hasToolCalls = messages.some((m) => (m.toolCalls?.length ?? 0) > 0);
 
   return (
     <main className="flex-1 flex flex-col min-h-0 min-w-0 bg-paper">
@@ -93,7 +91,7 @@ export default function ChatArea({
       <HarnessPhaseBar
         phase={phase}
         phaseLabel={phaseLabel}
-        visible={streaming || phase === "done"}
+        visible={streaming || phase === "done" || interrupted}
       />
 
       {/* 消息区域 / 欢迎页 */}
@@ -130,7 +128,7 @@ export default function ChatArea({
         disabled={streaming}
         queued={pendingQueue.length}
         showToolCalls={showToolCalls}
-        onToggleToolCalls={hasMessages && hasToolCalls ? setShowToolCalls : undefined}
+        onToggleToolCalls={setShowToolCalls}
       />
     </main>
   );

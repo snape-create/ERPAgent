@@ -7,7 +7,7 @@ from urllib.request import Request, urlopen
 
 
 def main():
-    run_id='langfuse-http-'+uuid.uuid4().hex[:12]
+    run_id='live-http-'+uuid.uuid4().hex[:12]
     rows=[]
     for prompt in ['你好，请只回复：你好。', '不调用任何工具，请计算 17 加 25，回答结果。']:
         started=time.perf_counter()

@@ -29,19 +29,19 @@ export default function ToolCallDisplay({ toolCall }: Props) {
   const preview = !expanded && toolCall.result ? firstLine(toolCall.result) : "";
 
   return (
-    <div className="rounded-ctl border border-hairline overflow-hidden">
+    <div className="min-w-0">
       <button
         onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
         aria-label={`工具调用 ${toolCall.name}`}
-        className="w-full flex items-center gap-2 h-8 px-2 hover:bg-raised/50 transition-colors duration-150 ease-quiet"
+        className="w-full flex items-center gap-2 h-7 pl-1 pr-2 rounded-[6px] hover:bg-raised/50 transition-colors duration-150 ease-quiet"
       >
         {expanded ? (
           <ChevronDown size={13} strokeWidth={1.5} className="shrink-0 text-ink-3" />
         ) : (
           <ChevronRight size={13} strokeWidth={1.5} className="shrink-0 text-ink-3" />
         )}
-        <span className="shrink-0 font-mono text-[12px] text-ink-2 truncate max-w-[45%]">
+        <span className="shrink-0 font-mono text-[11.5px] text-ink-2 truncate max-w-[42%]">
           {toolCall.name}
         </span>
         {preview && (
@@ -53,7 +53,7 @@ export default function ToolCallDisplay({ toolCall }: Props) {
       </button>
 
       {expanded && (
-        <div className="px-2 py-2 flex flex-col gap-2 border-t border-hairline">
+        <div className="mt-1 px-2 py-2 flex flex-col gap-2 border-t border-hairline">
           {toolCall.args && (
             <div>
               <span className="font-mono text-[11px] text-ink-3">参数</span>

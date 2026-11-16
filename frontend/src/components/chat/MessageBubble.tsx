@@ -27,7 +27,10 @@ function MessageBubble({
   showToolCalls = true,
 }: Props) {
   const isUser = message.role === "user";
-  const toolCalls = message.toolCalls ?? [];
+  // 评审器的结构化调用不是业务工具，历史消息里也可能有，一并过滤
+  const toolCalls = (message.toolCalls ?? []).filter(
+    (tc) => !/grade|rubric/i.test(tc.name)
+  );
   const hasMany = toolCalls.length > COLLAPSE_THRESHOLD;
   const [groupExpanded, setGroupExpanded] = useState(!hasMany);
   // 用户消息与历史消息直接全显；仅正在流式回答的气泡逐字推进
@@ -104,7 +107,7 @@ function MessageBubble({
           <div className="markdown-body">
             <Markdown>{typed}</Markdown>
             {isStreaming && (
-              <span className="inline-block w-[2px] h-[1em] bg-accent ml-0.5 align-middle animate-pulse" />
+              <span className="inline-block w-[2px] h-[1em] bg-accent ml-0.5 align-middle" />
             )}
           </div>
         )}

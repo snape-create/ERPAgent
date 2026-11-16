@@ -24,6 +24,48 @@ from ..log_utils import agent_logger
 
 DOWNLOAD_DIR = Path(__file__).parent.parent.parent / "download"
 
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"}
+
+
+def _is_image(filename: str) -> bool:
+    return Path(filename).suffix.lower() in IMAGE_EXTS
+
+
+def _build_result_message(
+    filename: str,
+    download_url: str,
+    size_kb: float,
+    *,
+    sandbox: bool,
+    remote_path: str | None = None,
+    local_path=None,
+) -> str:
+    """构造返回给模型的文案。
+
+    图片直接给出可内嵌的 Markdown（``![...](url)``），并明确要求模型面向用户
+    时内嵌显示、不要暴露沙箱 / 本地文件系统路径（用户点不开也无意义）。
+    非图片文件才退回普通下载链接。
+    """
+    lines = []
+    if _is_image(filename):
+        lines.append(f"✅ 图片已导出，可直接在回复中内嵌显示：")
+        lines.append(f"![{filename}]({download_url})")
+        lines.append(
+            "\n请在面向用户的回复中直接使用上面的 Markdown 把图片显示出来；"
+            "不要把沙箱路径或本地文件系统路径写给用户。"
+        )
+    else:
+        lines.append(f"✅ 文件已导出，下载链接：[下载 {filename}]({download_url})")
+    lines.append(f"文件大小: {size_kb:.1f} KB")
+    if remote_path is not None:
+        # 仅供调试/定位，明确标注不要展示给用户
+        lines.append(f"(沙箱内部路径 {remote_path}，仅供工具定位，不要展示给用户)")
+    if local_path is not None:
+        lines.append(f"(本地路径 {local_path}，不要展示给用户)")
+    if not sandbox:
+        lines.append("(注: 沙箱不可用，使用本地文件)")
+    return "\n".join(lines)
+
 
 def _path_has_content(container, path: str) -> bool:
     """判断路径是否"存在且有内容"。
@@ -196,12 +238,13 @@ def download_sandbox_file(remote_path: str, filename: str = "") -> str:
             agent_logger.info(
                 f"File downloaded from sandbox: {remote_path} -> {target} ({len(content)} bytes)"
             )
-            return (
-                f"✅ 文件已从沙箱下载!\n"
-                f"沙箱路径: {remote_path}\n"
-                f"文件大小: {file_size / 1024:.1f} KB\n"
-                f"下载链接: [下载 {filename}]({download_url})\n"
-                f"本地路径: {target}\n"
+            return _build_result_message(
+                filename,
+                download_url,
+                file_size / 1024,
+                sandbox=True,
+                remote_path=remote_path,
+                local_path=target,
             )
 
         except Exception as e:
@@ -222,13 +265,13 @@ def download_sandbox_file(remote_path: str, filename: str = "") -> str:
 
         download_url = f"http://localhost:8000/api/download/{quote(filename)}"
         agent_logger.info(f"File downloaded (local fallback): {source} -> {target}")
-        return (
-            f"✅ 文件已下载!\n"
-            f"路径: {remote_path}\n"
-            f"文件大小: {source.stat().st_size / 1024:.1f} KB\n"
-            f"下载链接: [下载 {filename}]({download_url})\n"
-            f"本地路径: {target}\n"
-            f"(注: 沙箱不可用，使用本地文件)\n"
+        return _build_result_message(
+            filename,
+            download_url,
+            source.stat().st_size / 1024,
+            sandbox=False,
+            remote_path=remote_path,
+            local_path=target,
         )
 
     return (

@@ -1,4 +1,4 @@
-import { Conversation, ChatRequest, ResumeRequest } from "./types";
+import { Conversation, ChatRequest, ResumeRequest, InterruptData } from "./types";
 
 // 默认走相对路径 /api，由 next.config.ts 的 rewrites 代理到后端；
 // 需要直连后端时可通过 NEXT_PUBLIC_API_BASE 覆盖。
@@ -62,7 +62,14 @@ export async function resumeChat(
   }
 }
 
-export async function getChatState(threadId: string) {
+export interface ChatStateResponse {
+  thread_id: string;
+  interrupted: boolean;
+  // 待审批/待补充的中断内容；没有中断时为 null
+  interrupt?: InterruptData | null;
+}
+
+export async function getChatState(threadId: string): Promise<ChatStateResponse> {
   const res = await fetch(`${BASE_URL}/chat/${threadId}/state`);
   if (!res.ok) throw new Error(`State failed: ${res.status}`);
   return res.json();

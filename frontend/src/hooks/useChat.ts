@@ -45,6 +45,13 @@ export function useChat() {
   const thinkingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const interruptedRef = useRef(false);
 
+  // 正在进行的那一轮请求属于哪个会话。切换会话时不再 abort：让它在后台跑完并落库，
+  // 切回来还能看到完整回答；凡是非前台会话的事件只写 ref，不进当前消息列表。
+  const threadIdRef = useRef<string>(threadId);
+  const streamThreadRef = useRef<string | null>(null);
+  const interruptPayloadRef = useRef<InterruptData | null>(null);
+  const interruptThreadRef = useRef<string | null>(null);
+
   const resetAssistantState = useCallback(() => {
     assistantMsgRef.current = "";
     toolCallsRef.current = [];
@@ -72,6 +79,8 @@ export function useChat() {
   }, []);
 
   const updateAssistantMessage = useCallback(() => {
+    // 后台会话（不是当前展示的）只累积文本，不渲染
+    if (streamThreadRef.current !== threadIdRef.current) return;
     setMessages((prev) => {
       const lastMsg = prev[prev.length - 1];
       const updated: ChatMessage = {
@@ -90,6 +99,14 @@ export function useChat() {
 
   const handleEvent = useCallback(
     (event: SSEEvent) => {
+      const foreground = streamThreadRef.current === threadIdRef.current;
+      // 文本/工具/中断即使不在前台也要处理（继续累积），其余 UI 状态只在前台更新
+      const alwaysHandle =
+        event.type === "token" ||
+        event.type.startsWith("tool_") ||
+        event.type === "interrupt";
+      if (!foreground && !alwaysHandle) return;
+
       switch (event.type) {
         case "token":
           assistantMsgRef.current += event.content;
@@ -123,8 +140,8 @@ export function useChat() {
           // 优先按 id 精确匹配；后端未带 id 时，退化为"当前运行实例"，
           // 再不行才按同名 + running 匹配（兼容旧后端）。
           const targetId =
-            event.id ??
-            currentToolIdRef.current ??
+            event.id ||
+            currentToolIdRef.current ||
             toolCallsRef.current.find(
               (tc) => tc.name === event.name && tc.status === "running"
             )?.id;
@@ -162,6 +179,9 @@ export function useChat() {
             "";
           const normalized: InterruptData = { ...rawData, interrupt_type: type };
           interruptedRef.current = true;
+          interruptPayloadRef.current = normalized;
+          interruptThreadRef.current = streamThreadRef.current;
+          if (!foreground) break;   // 后台会话等切回来再展示审批卡
           setInterrupted(true);
           setInterruptData(normalized);
           break;
@@ -175,7 +195,7 @@ export function useChat() {
             }
             setThinking(true);
             setPhase("thinking");
-            setPhaseLabel("💭 深度思考中");
+            setPhaseLabel("深度思考中");
           } else {
             // 延迟结束 thinking，保证动画至少显示 800ms；timer 可被清理
             if (thinkingTimerRef.current) clearTimeout(thinkingTimerRef.current);
@@ -233,15 +253,19 @@ export function useChat() {
 
         case "done":
           setStreaming(false);
-          setPhase("done");
-          setPhaseLabel("✅ 完成");
           setTodoItems((prev) =>
             prev.map((item) =>
               item.status !== "cancelled" ? { ...item, status: "complete" as const } : item
             )
           );
           if (event.interrupted) {
+            // 等审批不是"完成"：阶段条停在执行态并写明等待审批
             setInterrupted(true);
+            setPhase("executing");
+            setPhaseLabel("等待审批");
+          } else {
+            setPhase("done");
+            setPhaseLabel("已完成");
           }
           // 检查排队队列：进入审批中断时不自动发送，等用户处理完中断
           const q = pendingQueueRef.current;
@@ -261,11 +285,42 @@ export function useChat() {
   const { start, abort } = useSSE({
     onEvent: handleEvent,
     onError: (err) => {
-      setError(err.message);
-      setStreaming(false);
+      if (streamThreadRef.current === threadIdRef.current) {
+        setError(err.message);
+        setStreaming(false);
+      }
+      streamThreadRef.current = null;
     },
     onComplete: () => {
+      const foreground = streamThreadRef.current === threadIdRef.current;
+      streamThreadRef.current = null;
+      // 后台会话结束时不要动当前界面的状态
+      if (!foreground) return;
       setStreaming(false);
+
+      // 流结束但仍有工具停在 running（连接被掐断、后端进程重启等）：
+      // 把状态收口并明确告知，否则工具行会一直转圈，看起来像"卡住"
+      if (!interruptedRef.current) {
+        const stranded = toolCallsRef.current.some((tc) => tc.status === "running");
+        if (stranded) {
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.toolCalls?.some((tc) => tc.status === "running")
+                ? {
+                    ...msg,
+                    toolCalls: msg.toolCalls.map((tc) =>
+                      tc.status === "running"
+                        ? { ...tc, status: "error" as const }
+                        : tc
+                    ),
+                  }
+                : msg
+            )
+          );
+          setError("连接中断，有工具调用没有返回结果，请重新发送这一轮");
+        }
+      }
+
       // 整轮既没有正文、也没有进入中断 → 明确告知，避免"发消息毫无反应"
       if (!assistantMsgRef.current && !interruptedRef.current) {
         setError("未收到助手回复，请检查后端服务是否正常后重试");
@@ -280,8 +335,14 @@ export function useChat() {
       setInterrupted(false);
       setInterruptData(null);
       interruptedRef.current = false;
+      interruptPayloadRef.current = null;
+      interruptThreadRef.current = null;
       resetTransientUi();
       resetAssistantState();
+
+      // 这一轮的归属：后续事件据此判断要不要渲染到当前界面
+      threadIdRef.current = threadId;
+      streamThreadRef.current = threadId;
 
       const userMsg: ChatMessage = {
         id: uuidv4(),
@@ -291,6 +352,11 @@ export function useChat() {
       };
       setMessages((prev) => [...prev, userMsg]);
       setStreaming(true);
+      // 立刻给出可见反馈：阶段条和思考动画不等后端事件，
+      // 否则从按下回车到首个 token 之间会有一两秒"什么都没发生"
+      setThinking(true);
+      setPhase("thinking");
+      setPhaseLabel("正在连接模型…");
 
       start((onChunk, signal) =>
         streamChat(
@@ -316,8 +382,13 @@ export function useChat() {
     (content: string) => {
       if (!content.trim()) return;
 
-      if (streaming) {
-        // 正在回答：加入排队队列，回答完后自动发送
+      if (streamThreadRef.current) {
+        if (streamThreadRef.current !== threadIdRef.current) {
+          // 另一个会话还在后台生成：不允许往当前会话发，避免两条流互相覆盖
+          setError("另一个会话还在生成回复，请等它结束或切回该会话");
+          return;
+        }
+        // 同一会话：加入排队队列，回答完后自动发送
         const q = [...pendingQueueRef.current, content.trim()];
         pendingQueueRef.current = q;
         setPendingQueue(q);
@@ -335,8 +406,12 @@ export function useChat() {
       setInterruptData(null);
       setError(null);
       interruptedRef.current = false;
+      interruptPayloadRef.current = null;
+      interruptThreadRef.current = null;
       // resume 是同一次执行的延续：保留中断前已输出的正文和工具调用，
       // 只把阶段条切回执行态（不能停在 done/"✅ 完成"却又在转圈）
+      threadIdRef.current = threadId;
+      streamThreadRef.current = threadId;
       setStreaming(true);
       setPhase("executing");
       setPhaseLabel("");
@@ -354,13 +429,18 @@ export function useChat() {
 
   const newChat = useCallback(() => {
     abort();
+    streamThreadRef.current = null;
+    interruptPayloadRef.current = null;
+    interruptThreadRef.current = null;
     setMessages([]);
     setStreaming(false);
     setInterrupted(false);
     setInterruptData(null);
     setError(null);
     interruptedRef.current = false;
-    setThreadId(uuidv4());
+    const nextId = uuidv4();
+    threadIdRef.current = nextId;
+    setThreadId(nextId);
     setPendingQueue([]);
     pendingQueueRef.current = [];
     resetTransientUi();
@@ -368,19 +448,47 @@ export function useChat() {
   }, [abort, resetAssistantState, resetTransientUi]);
 
   const loadThread = useCallback(
-    (id: string, msgs: ChatMessage[]) => {
-      abort();
+    (id: string, msgs: ChatMessage[], restoredInterrupt?: InterruptData | null) => {
+      // 这里刻意不 abort：正在进行的那一轮继续在后台跑完并落库，
+      // 切回来时能拿到完整回答，而不是被截断的半句话。
+      threadIdRef.current = id;
       setThreadId(id);
       setMessages(msgs);
-      setStreaming(false);
-      setInterrupted(false);
-      setInterruptData(null);
+      const streamingThis = streamThreadRef.current === id;
+      // 优先用内存里的实时中断（切换回来的正在跑的会话），
+      // 否则用状态接口拉到的中断（刷新页面 / 进程重启后的待审批）
+      const liveInterrupt =
+        streamingThis &&
+        interruptThreadRef.current === id &&
+        interruptPayloadRef.current !== null;
+      const pending = liveInterrupt
+        ? interruptPayloadRef.current
+        : restoredInterrupt ?? null;
+      if (pending) {
+        interruptThreadRef.current = id;
+        interruptPayloadRef.current = pending;
+      } else {
+        interruptThreadRef.current = null;
+        interruptPayloadRef.current = null;
+      }
+      setStreaming(streamingThis);
+      setInterrupted(!!pending);
+      interruptedRef.current = !!pending;
+      setInterruptData(pending);
       setError(null);
-      interruptedRef.current = false;
       setPendingQueue([]);
       pendingQueueRef.current = [];
-      resetTransientUi();
-      resetAssistantState();
+      if (streamingThis) {
+        // 切回正在生成的会话：保留已累积的正文，继续往后渲染
+        setThinking(false);
+        setTodoItems([]);
+        setTodoVisible(false);
+        setPhase("executing");
+        setPhaseLabel("");
+      } else {
+        resetTransientUi();
+      }
+      if (!streamThreadRef.current) resetAssistantState();
     },
     [abort, resetAssistantState, resetTransientUi]
   );
@@ -404,6 +512,8 @@ export function useChat() {
     pendingQueue,
     phase,
     phaseLabel,
+    // 供外部（线程缓存逻辑）读取"当前展示的是哪个会话"，不触发重渲染
+    threadIdRef,
     sendMessage,
     resumeWith,
     newChat,

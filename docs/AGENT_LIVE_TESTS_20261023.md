@@ -22,7 +22,7 @@
 
 LangGraph 使用 `__interrupt__` 返回中断，而 SSE 适配器只识别 `interrupts`，导致审批卡片不下发，done 错报 `interrupted=false`。修改适配器兼容两个字段，保持审批时 `interrupted=true`。新增 4 项回归：现代审批事件、旧字段兼容、缺失字段补充中断、正常完成状态。
 
-新增测试加上既有回归，共 **87/87 通过**，按 8 组上传 Langfuse：审批 SSE 4、遥测 7、Skills 19、沙箱生命周期 11、记忆集成 8、业务判定器 9、混合审查 15、模型路由 14。这些组件测试含测试替身，不是 87 次真实模型/ERP 调用。
+新增测试加上既有回归，共 **87/87 通过**，分 8 组统计：审批 SSE 4、Skills 19、沙箱生命周期 11、记忆集成 8、业务判定器 9、混合审查 15、模型路由 14，另有 7 项内部埋点回归。这些组件测试含测试替身，不是 87 次真实模型/ERP 调用。
 
 ## 真实数据改动
 
@@ -32,24 +32,13 @@ LangGraph 使用 `__interrupt__` 返回中断，而 SSE 适配器只识别 `inte
 - 第一轮两个失败用例停在审批处，未创建订单；保留会话和检查点以便排查。
 - 新增的测试数据保留追溯，没有删除或覆盖原有业务数据。
 
-## Langfuse 查看
+## 原始结果
 
-- `实测：…`：中文测试说明、断言与 acceptance 评分。
-- `组件回归：…`：明确标记替身环境的回归结果。
-- 实际 `erp.request` 链路中增加 `验收说明：…` 子记录，给出中文任务和整场景断言；这是执行后注释，不是额外模型调用。查询与审批恢复分别对应不同 Trace。
-- 原始对话、真实 ERP 返回和凭证仍不上传；上传的中文描述为预设合成测试说明。
-- 首项验收摘要曾因上报超时丢失，已补传，标记 `report_replay=true`，不计为重跑。
-
-[订单通过验收报告](https://us.cloud.langfuse.com/project/cmvkwfdsz008cad0j8ussq2w8/traces/b734cc4322a83f82bece3c931bf2fbe8)
-
-[真实订单后端链路之一](https://us.cloud.langfuse.com/project/cmvkwfdsz008cad0j8ussq2w8/traces/c07b748e66ed1d57628ccb3652096c58)
-
-[跨会话记忆实际链路](https://us.cloud.langfuse.com/project/cmvkwfdsz008cad0j8ussq2w8/traces/f5ea7d87d66264ac05797f8681bd06e8)
-
-全部链接与原始结果位于 `evals/business/results/agent-live-evidence-links-20261023.json`、两个 `agent-live-LF...` 目录及 `agent-component-20261023.json`。
+- 逐条结果与原始轨迹保存在 `evals/business/results/agent-live-LF...` 两个目录及 `agent-component-20261023.json`。
+- 这些记录包含真实 ERP 的返回内容，只用于本地复现，不要连同数据库连接串一起外发。
 
 ## 简历表述建议
 
-接入 Langfuse 建立业务与 Agent 能力分层评测，覆盖真实 ERP 审批写入、Skills 按需加载、跨会话记忆及用户隔离；通过端到端测试定位并修复审批中断事件丢失问题，完成真实订单审批通过/拒绝复测，并通过 87 项组件回归。
+通过真实 FastAPI → Agent → 模型 → MCP → ERP 的端到端测试，覆盖审批写入、Skills 按需加载、跨会话记忆及用户隔离；定位并修复审批中断事件丢失问题，完成订单审批通过/拒绝复测，并通过 87 项组件回归。
 
 不应写成“87 条全链路测试”“全接口安全验证”或“故障恢复全链路已验证”。既有 Docker seccomp 降级问题仍待修复，本次未修改。

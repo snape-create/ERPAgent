@@ -139,7 +139,7 @@ textarea:focus-visible {
   margin-bottom: 0;
 }
 .markdown-body p {
-  margin: 0.6em 0;
+  margin: 0.7em 0;
   line-height: 1.72;
 }
 .markdown-body ul,
@@ -214,7 +214,8 @@ textarea:focus-visible {
 }
 .markdown-body th,
 .markdown-body td {
-  padding: 0.5em 0.75em;
+  padding: 8px 12px;
+  line-height: 1.55;
   text-align: left;
   vertical-align: top;
   overflow-wrap: break-word;
@@ -244,8 +245,9 @@ textarea:focus-visible {
 .markdown-body h4,
 .markdown-body h5,
 .markdown-body h6 {
-  margin: 1.1em 0 0.45em;
-  font-weight: 500;
+  /* 标题上方留白 > 下方，长回答按段落分组时才读得出层次 */
+  margin: 1.5em 0 0.5em;
+  font-weight: 600;
   line-height: 1.45;
   color: var(--text-900);
 }

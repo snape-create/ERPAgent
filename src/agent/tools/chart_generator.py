@@ -8,6 +8,7 @@
 - 沙箱不可用时返回错误，不降级到宿主机执行
 """
 import json
+import uuid
 from datetime import datetime
 from pathlib import Path
 from langchain_core.tools import tool
@@ -266,13 +267,16 @@ def generate_chart(
         return "错误: 沙箱不可用。请确保 Docker 沙箱容器已启动。"
 
     # 沙箱内路径
+    # ToolNode 会并发执行多个工具：只精确到秒的时间戳会让同秒的多次调用
+    # 共用同一份 params/script，互相覆盖后执行时读错参数直接 traceback。
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    unique = uuid.uuid4().hex[:8]
     safe_title = "".join(c if c.isalnum() or c in "-_" else "_" for c in title[:20])
-    output_name = f"chart_{chart_type}_{safe_title}_{timestamp}.png"
+    output_name = f"chart_{chart_type}_{safe_title}_{timestamp}_{unique}.png"
     charts_dir = "/workspace/charts"
     output_path = f"{charts_dir}/{output_name}"
-    params_filename = f"_params_{timestamp}.json"
-    script_filename = f"_chart_script_{timestamp}.py"
+    params_filename = f"_params_{timestamp}_{unique}.json"
+    script_filename = f"_chart_script_{timestamp}_{unique}.py"
     params_path = f"{charts_dir}/{params_filename}"
     script_path = f"{charts_dir}/{script_filename}"
 
@@ -318,15 +322,18 @@ def generate_chart(
                     f"Chart generated in sandbox: {output_path} ({file_size} bytes)"
                 )
                 return (
-                    f"✅ 图表已生成!\n"
+                    f"✅ 图表已在沙箱中生成!\n"
                     f"标题: {title}\n"
                     f"类型: {chart_type}\n"
                     f"数据点: {len(data_list)}\n"
                     f"文件大小: {file_size / 1024:.1f} KB\n"
-                    f"沙箱路径: {output_path}\n"
+                    f"沙箱内部路径: {output_path}\n"
                     f"\n"
-                    f"💡 如需下载到本地，请使用 download_sandbox_file 工具，"
-                    f"传入沙箱路径: {output_path}"
+                    f"下一步：调用 download_sandbox_file 工具，传入上面的沙箱路径把图片导出；"
+                    f"导出后会拿到可访问的 http 图片地址，再在面向用户的回复中用 "
+                    f"![{title}](http地址) 直接内嵌显示。\n"
+                    f"注意：沙箱内部路径 {output_path} 用户无法访问，"
+                    f"严禁把它直接写进给用户的回复。"
                 )
             else:
                 return f"图表生成后文件未找到: {output_path}"

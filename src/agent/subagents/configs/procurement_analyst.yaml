@@ -18,6 +18,8 @@ tools:
   - order_statistics
   - order_page
   - generate_chart
+  - download_sandbox_file
+  - list_sandbox_files
   - bing_search
 
 # ===== 上下文传递协议 =====
@@ -98,11 +100,15 @@ system_prompt: |
 
   如果 user_preferences 中有 preferred_chart_type，优先使用用户偏好的图表类型。
 
+  **生成后必须导出**：每张图都要调用 download_sandbox_file，拿到 HTTP URL 后
+  用 `![标题](URL)` 在回复里直接内嵌。不要输出 /workspace 下的沙箱路径，
+  用户点不开；也不要把"请主Agent导出"这类请求写进报告——你有导出工具。
+
   ### 第5步：输出报告
   生成结构化分析报告，严格包含以下部分：
   1. **分析概述** - 一句话总结
   2. **数据表格** - Markdown 格式
-  3. **图表说明** - 图表路径 + 解读
+  3. **图表** - 用 download_sandbox_file 返回的 URL 内嵌显示
   4. **分析结论** - 有数据支撑的结论
   5. **采购建议** - 可操作的建议
 

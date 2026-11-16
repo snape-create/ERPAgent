@@ -89,9 +89,10 @@ class ReviewPolicy:
         if not pending and re.fullmatch(r"(?:你好|您好|嗨|hello|hi|谢谢|感谢|再见|你是谁)[！!。？?\s]*", text, re.I):
             return ReviewRoute(decision="skip", reason="独立问候或感谢")
         # Narrow exact concept grammar, not 'anything starting with 请解释'.
-        if not pending and re.fullmatch(r"(?:什么是[\w]{1,12}|[\w]{1,12}是什么)[？?。\s]*", text):
+        # 允许概念词前有空格（"什么是 Skill"），否则会掉到模型路由，白等一次往返。
+        if not pending and re.fullmatch(r"(?:什么是\s?[\w]{1,12}|[\w]{1,12}\s?是什么)[？?。\s]*", text):
             return ReviewRoute(decision="skip", reason="单一概念定义")
-        if re.search(r"查询|搜索|统计|分析|比较|对比|计算|生成|导出", text):
+        if re.search(r"查询|查看|列出|搜索|统计|分析|比较|对比|计算|生成|导出|单价|价格|库存|供应商", text):
             return ReviewRoute(decision="review", task_type=task, reason="明确数据处理或交付请求", checks=["constraints", "sources"])
         return None
 

@@ -15,7 +15,7 @@ skills_dir = "/skills"     # 技能目录（SANDBOX_SKILLS_DIR）
 memories_dir = "/memories" # 记忆目录（SANDBOX_MEMORIES_DIR）
 
 # 预热池大小：常驻空闲容器数量（SANDBOX_WARM_POOL_SIZE）
-warm_pool_size = 1
+warm_pool_size = 2
 
 # 空闲容器回收超时（分钟）（SANDBOX_IDLE_TIMEOUT_MINUTES）
 idle_timeout_minutes = 30

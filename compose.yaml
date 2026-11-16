@@ -26,12 +26,13 @@ services:
       - pg-data:/var/lib/postgresql/data
 
   sandbox:
-    profiles: ["sandbox"]
     build:
       context: ./docker
       dockerfile: Dockerfile.sandbox
     image: erp-agent-sandbox:latest
+    pull_policy: build
     command: ["true"]
+    restart: "no"
 
 volumes:
   mongo-data:

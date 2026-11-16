@@ -50,8 +50,9 @@ export default function InputBar({
 
   return (
     <div className="shrink-0 px-4 md:px-6 pt-2 pb-3">
-      <div className="mx-auto w-full">
-        <div className="flex items-end gap-2 bg-surface border border-hairline rounded-panel px-3 py-2 shadow-lift focus-within:border-accent/60 focus-within:ring-4 focus-within:ring-accent/10 transition-[border-color,box-shadow] duration-150 ease-quiet">
+      {/* 与正文列同宽，避免输入框在宽屏下拉满整行、和 760 的内容对不齐 */}
+      <div className="mx-auto w-full max-w-[760px]">
+        <div className="flex items-end gap-2 bg-surface border border-hairline rounded-[12px] px-3 py-2.5 shadow-lift focus-within:border-accent/60 focus-within:ring-4 focus-within:ring-accent/10 transition-[border-color,box-shadow] duration-150 ease-quiet">
           <textarea
             ref={textareaRef}
             value={input}

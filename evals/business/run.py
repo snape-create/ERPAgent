@@ -88,8 +88,7 @@ async def _one(case):
         uid='eval-'+case['id'];tokens=bind_runtime(uid,store)
         try:
             graph=main.create_main_agent(ProcurementContext(user_id=uid,username='测试采购员'),InMemorySaver(),store)
-            from src.agent.observability import traced_config
-            config=traced_config({'configurable':{'thread_id':case['id'],'user_id':uid},'callbacks':[usage],'recursion_limit':70})
+            config={'configurable':{'thread_id':case['id'],'user_id':uid},'callbacks':[usage],'recursion_limit':70}
             async def conversation():
                 nonlocal state,output
                 state=await graph.ainvoke({'messages':[HumanMessage(content=case['prompt'])]},config)
@@ -124,28 +123,7 @@ async def _one(case):
 
 
 async def one(case):
-    from src.agent.observability import Trace, _current
-    trace=Trace('synthetic-business-evaluation',case['id'])
-    token=_current.set(trace)
-    status='failed'
-    try:
-        result=await _one(case)
-        status='completed' if result['error'] is None else 'failed'
-        if trace.root:
-            result['trace_id']=trace.root.trace_id
-            try:
-                trace.root.update(metadata={'evaluation':True,'historical_import':False,
-                    'erp_environment':'in_process_fixture','case_id':case['id'],
-                    'kind':case['kind'],'passed':result['passed']})
-                for name,value in {'task_acceptance':result['passed'],**result['checks']}.items():
-                    trace.client.create_score(trace_id=trace.root.trace_id,name=name,
-                        value=int(value),data_type='BOOLEAN')
-            except Exception:
-                result['telemetry_score_error']=True
-        return result
-    finally:
-        trace.finish(status)
-        _current.reset(token)
+    return await _one(case)
 
 
 def summarize(rows):
@@ -184,8 +162,6 @@ async def run(args):
         if report['input_tokens']+report['output_tokens']>1000000:
             print('Token soft limit reached; remaining cases not run',flush=True);break
     print(json.dumps(summarize(rows),ensure_ascii=False),flush=True)
-    from src.agent.observability import shutdown
-    await shutdown()
 
 
 if __name__=='__main__':

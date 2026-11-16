@@ -236,8 +236,24 @@ function normalizeLine(line: string): string {
   return s;
 }
 
+/**
+ * 归一化结果 LRU：切换历史会话时气泡会重新挂载，useMemo 缓存随之丢失，
+ * 同一段内容每次都要重跑下面十几条正则。用原文做 key 做模块级缓存，
+ * 命中时零成本；Map 的插入顺序天然实现 LRU，超量淘汰最久未用项。
+ */
+const NORMALIZE_CACHE_MAX = 200;
+const normalizeCache = new Map<string, string>();
+
 export function normalizeMarkdown(md: string): string {
   if (!md) return md;
+
+  const cached = normalizeCache.get(md);
+  if (cached !== undefined) {
+    // 提到最新位置（最近使用），LRU 只淘汰真正冷掉的条目
+    normalizeCache.delete(md);
+    normalizeCache.set(md, cached);
+    return cached;
+  }
 
   // 单行 `$$...$$` 先展开成块级形式，再摘出来保护
   const { text: protectedText, blocks } = protectMath(normalizeDisplayMath(md));
@@ -301,5 +317,13 @@ export function normalizeMarkdown(md: string): string {
 
   flushTable();
 
-  return restoreMath(out.join("\n"), blocks);
+  const result = restoreMath(out.join("\n"), blocks);
+
+  normalizeCache.set(md, result);
+  if (normalizeCache.size > NORMALIZE_CACHE_MAX) {
+    const oldest = normalizeCache.keys().next().value;
+    if (oldest !== undefined) normalizeCache.delete(oldest);
+  }
+
+  return result;
 }

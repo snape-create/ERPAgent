@@ -226,6 +226,26 @@ class SkillsSyncMiddleware(AgentMiddleware):
                 folder_hash.update(f"{rel}:{file_hash}".encode())
         return folder_hash.hexdigest()
 
+    def assume_synced(self) -> None:
+        """bootstrap 已经把整个项目（含 src/skills）拷进沙箱时调用。
+
+        直接登记本地哈希与当前 generation，省掉首次逐文件上传的 14 次 RPC
+        （实测约 2 秒）。沙箱重建会走 invalidate + 全量同步，不受影响。
+        """
+        if not self._skills_dir or not self._skills_dir.exists():
+            return
+        self._file_hashes = {
+            str(path.relative_to(self._skills_dir)).replace("\\", "/"): self._compute_hash(path)
+            for path in self._skills_dir.rglob("*")
+            if path.is_file() and not self._should_skip(path)
+        }
+        self._last_synced_files = set(self._file_hashes)
+        self._first_sync_done = True
+        self._last_sandbox_generation = getattr(self._sandbox_backend, "generation", None)
+        middleware_logger.info(
+            f"Skills assumed synced by bootstrap: {len(self._file_hashes)} files"
+        )
+
     def invalidate(self):
         """手动失效缓存，强制下次完整同步（新 Skill 安装后调用）"""
         self._file_hashes.clear()

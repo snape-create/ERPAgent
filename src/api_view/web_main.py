@@ -38,23 +38,29 @@ async def _sandbox_maintenance(stop_event: asyncio.Event) -> None:
             await asyncio.to_thread(sandbox_manager.ensure_warm_pool)
         except Exception as exc:
             web_logger.warning(f"Sandbox maintenance iteration failed: {exc}")
+        # 用 wait 而不是 sleep：关停时能立刻退出，不用等满一个周期
+        if await stop_event.wait(SANDBOX_MAINTENANCE_INTERVAL_SECONDS):
+            break
 
 
 async def _warm_default_agent() -> None:
-    """后台预热默认用户 Agent（含 MCP 工具加载），不阻塞 Web 启动。
+    """后台预热：只把 MCP 工具装进全局缓存，不构建 Agent、不申请沙箱。
 
-    - 预热完成后 default_user 首条消息零等待（session 已构建）；
-    - MCP 工具缓存是全局共享的，预热后其他用户首次请求也能命中缓存；
-    - 预热失败只记 warning，首请求仍会按需构建（现有逻辑兜底）。
+    - MCP 工具缓存是进程级共享的，预热后所有用户首次请求都能命中；
+    - default_user 只是"会话归属查不到"时的兜底身份（见 resume 路由），
+      为它构建 Agent 会额外认领一个 512M 沙箱并上传整个项目，不划算；
+    - 预热失败只记 warning，首个请求仍会按需加载。
     """
     try:
-        from .agent_loader import agent_loader
+        from ..agent.tools.mcp_client import load_mcp_tools_sync
 
-        await agent_loader.initialize("default_user")
-        web_logger.info("Default user agent warmed up (MCP tools loaded)")
+        tools = await asyncio.to_thread(load_mcp_tools_sync)
+        web_logger.info(
+            f"MCP tools warmed up ({len(tools)} tools), no sandbox claimed"
+        )
     except Exception as e:
         web_logger.warning(
-            f"Agent warmup failed, will build on first request: {e}"
+            f"MCP warmup failed, will load on first request: {e}"
         )
 
 
@@ -66,6 +72,12 @@ async def lifespan(app: FastAPI):
     maintenance_task = None
     warmup_task = None
     try:
+        # 上次进程可能被 Ctrl+C / 强杀，warm 容器来不及清理；启动时兜底扫一次。
+        # 只删 MongoDB 里没登记的 warm（已认领的用户容器有登记，不会动）。
+        try:
+            await asyncio.to_thread(sandbox_manager.cleanup_stale_warm)
+        except Exception as exc:
+            web_logger.warning(f"Stale warm cleanup failed: {exc}")
         # 预热失败不阻止 Web 服务启动；首个请求仍会按需创建并回退到 LocalShell。
         await asyncio.to_thread(sandbox_manager.ensure_warm_pool)
         maintenance_task = asyncio.create_task(
@@ -87,10 +99,13 @@ async def lifespan(app: FastAPI):
             warmup_task.cancel()
             with suppress(asyncio.CancelledError):
                 await warmup_task
-        # 不销毁已认领容器：Manager 会把 user → container 映射持久化，重启后可恢复。
+        # warm 容器没有用户数据，关停时直接销毁，否则每次重启都会遗留一个；
+        # 已认领容器不销毁：Manager 会把 user → container 映射持久化，重启后可恢复。
+        try:
+            await asyncio.to_thread(sandbox_manager.destroy_warm_sandboxes)
+        except Exception as exc:
+            web_logger.warning(f"Failed to destroy warm sandboxes: {exc}")
         await close_mongo_client()
-        from ..agent.observability import shutdown
-        await shutdown()
 
 
 app = FastAPI(

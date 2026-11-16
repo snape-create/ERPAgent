@@ -20,7 +20,8 @@ class ChatInterruptTests(unittest.IsolatedAsyncioTestCase):
             for name in ['save_display_messages','save_harness_trace','save_conversation']:
                 stack.enter_context(patch.object(chat.agent_loader,name,AsyncMock()))
             stack.enter_context(patch.object(sandbox_manager,'acquire_lease',return_value=False))
-            chunks=[x async for x in chat.stream_chat_response.__wrapped__('test','test-thread','test-user')]
+            stream_fn=getattr(chat.stream_chat_response,'__wrapped__',chat.stream_chat_response)
+            chunks=[x async for x in stream_fn('test','test-thread','test-user')]
         self.assertFalse(session.run_lock.locked())
         return [(c.split('\n')[0][7:],json.loads(c.split('\n')[1][6:])) for c in chunks]
 

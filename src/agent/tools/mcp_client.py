@@ -16,7 +16,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import Field, create_model
 
 from ..config import MCP_URL, MCP_USE_EMBEDDED
-from ..env_utils import PROJECT_ROOT
+from ..env_utils import PROJECT_ROOT, get_env
 from ..log_utils import mcp_logger
 
 # 重试配置
@@ -42,8 +42,14 @@ _config_mcp_lock = asyncio.Lock()
 BUILTIN_MCP_NAME = "erp-builtin"
 BUILTIN_MCP_DESCRIPTION = "ERP 采购管理内置工具（供应商 / 零部件 / 订单 / 库存）"
 
-# 被用户禁用的 config MCP server 名集合（内存态，重启恢复默认=全部启用）
-_disabled_servers: set[str] = set()
+# 被禁用的 config MCP server 名集合。默认全部启用，可用环境变量
+# MCP_DISABLED_SERVERS=bing-search,12306 在进程启动时就跳过，避免为不用的
+# 外部服务付出建连时间（冷启动时每个远程/子进程 server 都要握手）。
+_disabled_servers: set[str] = {
+    name.strip()
+    for name in (get_env("MCP_DISABLED_SERVERS", "") or "").split(",")
+    if name.strip()
+}
 
 
 def _read_config_server_names() -> List[str]:
@@ -290,6 +296,9 @@ async def load_mcp_tools(force_refresh: bool = False) -> List[BaseTool]:
     last_error = None
     for attempt in range(MAX_RETRIES):
         try:
+            # 注意：这里不要用 asyncio.gather 并行加载 config MCP。
+            # 启动预热线程与首条请求会各自在独立事件循环里调用，
+            # 并发时会复用同一个 MCP 会话上下文，实测会互相阻塞。
             tools = await loader(force_refresh)
             config_tools = await load_config_mcp_tools(force_refresh)
             all_tools = tools + config_tools

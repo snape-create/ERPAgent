@@ -14,6 +14,7 @@ interface Props {
   onSearchChange: (v: string) => void;
   onNewChat: () => void;
   onSelectThread: (id: string) => void;
+  onPrefetchThread: (id: string) => void;
   onDeleteThread: (id: string) => void;
   // 移动端抽屉状态
   mobileOpen: boolean;
@@ -27,6 +28,7 @@ export default function Sidebar({
   onSearchChange,
   onNewChat,
   onSelectThread,
+  onPrefetchThread,
   onDeleteThread,
   mobileOpen,
   onClose,
@@ -68,10 +70,10 @@ export default function Sidebar({
           <SearchBox value={searchQuery} onChange={onSearchChange} />
         </div>
 
-        <div className="flex items-center justify-between px-4 pt-6 pb-2">
+        <div className="flex items-center justify-between px-3 pt-6 pb-2">
           <span className="text-[12px] text-ink-3">历史会话</span>
           <span className="font-mono text-[11px] text-ink-3 tnum">
-            {conversations.length}
+            {conversations.length} 条
           </span>
         </div>
 
@@ -79,14 +81,11 @@ export default function Sidebar({
           conversations={conversations}
           activeThreadId={activeThreadId}
           onSelect={handleSelect}
+          onPrefetch={onPrefetchThread}
           onDelete={onDeleteThread}
         />
 
         <McpPanel />
-
-        <div className="px-4 py-3">
-          <span className="font-mono text-[11px] text-ink-3">ERP Agent · v1.0.0</span>
-        </div>
       </aside>
     </>
   );

@@ -8,7 +8,9 @@
 - display_messages 实时累积（用户消息 + 助手回复 + 工具调用）
 - SSE 事件协议: token / tool_start / tool_args / tool_result / tool_end / interrupt / done
 """
+import asyncio
 import json
+import re
 import uuid
 from typing import AsyncGenerator
 from datetime import datetime
@@ -22,6 +24,13 @@ from ...agent.schema import ChatRequest, ResumeRequest
 from ...agent.log_utils import web_logger
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+# 流式过程中保存进度的最小间隔（秒）。断流时还会额外做一次兜底保存。
+PERSIST_INTERVAL_SECONDS = 1.5
+
+# 内部结构化调用（评审器、订单意图分类器）不是业务工具，不该出现在前端工具列表里
+# OrderIntentDecision 是 with_structured_output 绑定的工具名，会冒泡到 messages 流
+INTERNAL_TOOL_PATTERN = re.compile(r"(grade|rubric|order_?intent)", re.I)
 
 
 def sse_event(event: str, data: dict) -> str:
@@ -78,6 +87,80 @@ def normalize_edit_decisions(decisions: list) -> list:
             "edited_action": {"name": tool_name, "args": args},
         })
     return normalized
+
+
+async def resolve_part_codes(resume_value: dict) -> dict:
+    """补充信息里用零件编码（P-001）代替数字 ID 时，先翻译成 partId。
+
+    表单允许填编码，但订单接口要的是 parts.id。查一次零件列表做映射；
+    查不到就原样返回，交给工具按缺字段提示，不在这里猜。
+    """
+    supplement = resume_value.get("supplement")
+    if not isinstance(supplement, str):
+        return resume_value
+    try:
+        data = json.loads(supplement)
+    except (ValueError, TypeError):
+        return resume_value
+    if not isinstance(data, dict):
+        return resume_value
+
+    details = data.get("orderDetail")
+    if not isinstance(details, list):
+        return resume_value
+
+    pending = [
+        item for item in details
+        if isinstance(item, dict) and not item.get("partId") and item.get("partCode")
+    ]
+    if not pending:
+        return resume_value
+
+    try:
+        from ...mcp_server.http_base import erp_client
+        page = await erp_client.get(
+            "/api/parts/page", params={"current": 1, "size": 200}
+        )
+        records = page.get("records") if isinstance(page, dict) else None
+        mapping = {
+            str(row.get("partCode", "")).upper(): row.get("id")
+            for row in (records or [])
+        }
+        for item in pending:
+            code = str(item.get("partCode", "")).strip().upper()
+            if mapping.get(code):
+                item["partId"] = mapping[code]
+            item.pop("partCode", None)
+    except Exception as exc:
+        web_logger.warning(f"Resolve partCode failed: {exc}")
+        return resume_value
+
+    return {**resume_value, "supplement": json.dumps(data, ensure_ascii=False)}
+
+
+def build_interrupt_event(interrupt_value: dict) -> dict:
+    """把 LangGraph 的中断值转成前端可渲染的 payload。
+
+    SSE 流与 ``GET /{thread_id}/state`` 共用：刷新页面后靠它把待审批卡片补回来。
+    """
+    if interrupt_value.get("type") == "order_info_request":
+        return {
+            "interrupt_type": "order_info_supplement",
+            "missing_fields": interrupt_value.get("missing_fields", []),
+            "message": interrupt_value.get("message", ""),
+            "extracted_data": interrupt_value.get("current_data", {}),
+        }
+    if interrupt_value.get("action_requests"):
+        return {
+            "interrupt_type": "hitl_approval",
+            **flatten_hitl_actions(interrupt_value),
+        }
+    return {
+        "interrupt_type": "hitl_approval",
+        "tool_name": interrupt_value.get("tool_name", ""),
+        "tool_args": interrupt_value.get("tool_args", interrupt_value),
+        "order_data": interrupt_value.get("tool_args", interrupt_value),
+    }
 
 
 def flatten_hitl_actions(interrupt_value: dict) -> dict:
@@ -143,19 +226,16 @@ async def enrich_status_change(payload: dict) -> dict:
 
 
 # Harness 阶段 → 前端展示文案
+# 阶段文案不再用 emoji 当图标：进度由前端阶段条的点位表达，文案保持纯文字
 PHASE_LABELS = {
-    "planning": "📝 规划中",
-    "executing": "⚙️ 执行中",
-    "reviewing": "🔍 审查中",
-    "result": "📊 已完成",
-    "thinking": "💭 思考中",
+    "planning": "规划中",
+    "executing": "执行中",
+    "reviewing": "审查中",
+    "result": "已完成",
+    "thinking": "思考中",
 }
 
 
-from ...agent.observability import traced_stream, traced_config, event
-
-
-@traced_stream
 async def stream_chat_response(
     message: str,
     thread_id: str,
@@ -174,15 +254,12 @@ async def stream_chat_response(
     - 实时将 assistant 回复追加到 display_messages
     - 流结束后持久化到 MongoDB
     """
-    yield sse_event("thinking", {"status": "start", "phase": "initializing"})
+    # 注意：这里刻意不先 yield——用户消息要先落库再开始推事件，
+    # 否则客户端在第一个事件后就断开时，这句话会彻底丢失。
 
     # 每个用户有独立 Agent（含 Proxy、中间件缓存和 SandboxManager 映射）。
     session = await agent_loader.get_session(user_id, username)
-    config = traced_config(agent_loader.create_config(thread_id, user_id))
-    if resume_data is not None:
-        decisions = resume_data.get('decisions', []) if isinstance(resume_data, dict) else []
-        event('hitl.resume', approved=any(d.get('type') in ('approve','edit') for d in decisions if isinstance(d,dict)),
-              rejected=any(d.get('type')=='reject' for d in decisions if isinstance(d,dict)))
+    config = agent_loader.create_config(thread_id, user_id)
 
     # 加载已有消息（恢复场景）或初始化
     if resume_data:
@@ -200,10 +277,16 @@ async def stream_chat_response(
                 **resume_data,
                 "decisions": normalize_edit_decisions(resume_data["decisions"]),
             }
-        current_input = Command(
-            resume=resume_value,
-            update={"_human_approved": approved},
-        )
+        # 补充信息表单允许填零件编码，这里换成订单接口要的 partId
+        if isinstance(resume_value, dict) and "supplement" in resume_value:
+            resume_value = await resolve_part_codes(resume_value)
+        # 补充信息场景（resume 里没有 decisions）不能写 _human_approved：
+        # 中断点的待应用写入里已经带了该键，同一个 super-step 再写一次会抛
+        # InvalidUpdateError: At key '_human_approved': Can receive only one value per step
+        command_kwargs: dict = {"resume": resume_value}
+        if decisions:
+            command_kwargs["update"] = {"_human_approved": approved}
+        current_input = Command(**command_kwargs)
     else:
         display_messages = await agent_loader.get_display_messages(thread_id)
         display_messages.append({
@@ -213,6 +296,10 @@ async def stream_chat_response(
             "timestamp": datetime.now().isoformat(),
         })
         current_input = {"messages": [{"role": "user", "content": message}]}
+        # 用户消息立刻落库：随后若断流（切换会话、关页面）也不会丢掉这一句
+        await agent_loader.save_display_messages(thread_id, display_messages)
+
+    yield sse_event("thinking", {"status": "start", "phase": "initializing"})
 
     # 当前助手消息累积缓冲
     assistant_content = ""
@@ -227,14 +314,51 @@ async def stream_chat_response(
     last_review_sig = None
     harness_trace: list = []
 
+    # ---- 进度保存 ----
+    # 之前只在"流正常结束 / 审批中断"时落库，客户端切换会话触发断流就会把这一轮
+    # 完整丢掉（库里只剩一条空会话）。这里改成三处保存：用户消息即刻、生成中节流、
+    # finally 兜底（shield 保证取消时也能写完）。
+    assistant_entry_holder: dict | None = None
+    assistant_appended = False
+    last_persist = 0.0
+
+    def assistant_entry() -> dict:
+        nonlocal assistant_entry_holder
+        if assistant_entry_holder is None:
+            assistant_entry_holder = {
+                "id": str(uuid.uuid4()),
+                "role": "assistant",
+                "content": "",
+                "toolCalls": None,
+                "timestamp": datetime.now().isoformat(),
+            }
+        assistant_entry_holder["content"] = assistant_content
+        assistant_entry_holder["toolCalls"] = tool_calls_buffer if tool_calls_buffer else None
+        return assistant_entry_holder
+
+    def build_snapshot() -> list:
+        """当前进度的完整快照（含尚未写完的助手消息）。"""
+        entries = list(display_messages)
+        if assistant_content and not assistant_appended:
+            entries.append(dict(assistant_entry()))
+        return entries
+
+    async def persist_progress() -> None:
+        await agent_loader.save_display_messages(thread_id, build_snapshot())
+
+    async def maybe_persist(force: bool = False) -> None:
+        nonlocal last_persist
+        now = time.monotonic()
+        if force or now - last_persist >= PERSIST_INTERVAL_SECONDS:
+            last_persist = now
+            await persist_progress()
+
     from ...agent.backends.sandbox_holder import bind_sandbox, reset_sandbox
     from ...agent.backends.sandbox_manager import sandbox_manager
     from ...agent.runtime_context import bind_runtime, reset_runtime
 
     import time
-    lock_started = time.perf_counter()
     await session.run_lock.acquire()
-    event('request.lock_wait', duration_ms=(time.perf_counter()-lock_started)*1000)
     lease_acquired = sandbox_manager.acquire_lease(user_id)
     sandbox_token = bind_sandbox(user_id)
     runtime_tokens = bind_runtime(user_id, agent_loader.store)
@@ -253,7 +377,6 @@ async def stream_chat_response(
                 if isinstance(chunk, dict):
                     if not namespace and chunk.get("review_decision"):
                         decision = chunk["review_decision"]
-                        event('review.decision', review=decision.get('decision')=='review')
                         signature = json.dumps(decision, ensure_ascii=False, sort_keys=True)
                         if signature != last_review_sig:
                             last_review_sig = signature
@@ -306,41 +429,17 @@ async def stream_chat_response(
                                 if hasattr(interrupt_item, "value")
                                 else interrupt_item
                             )
-                            if isinstance(interrupt_value, dict):
-                                # 判断中断类型
-                                if interrupt_value.get("type") == "order_info_request":
-                                    yield sse_event("interrupt", {
-                                        "interrupt_type": "order_info_supplement",
-                                        "missing_fields": interrupt_value.get("missing_fields", []),
-                                        "message": interrupt_value.get("message", ""),
-                                        "extracted_data": interrupt_value.get("current_data", {}),
-                                    })
-                                elif interrupt_value.get("action_requests"):
-                                    payload = await enrich_status_change(
-                                        flatten_hitl_actions(interrupt_value)
-                                    )
-                                    yield sse_event("interrupt", {
-                                        "interrupt_type": "hitl_approval",
-                                        **payload,
-                                    })
-                                else:
-                                    # 通用中断（interrupt_on 触发的审批）
-                                    yield sse_event("interrupt", {
-                                        "interrupt_type": "hitl_approval",
-                                        "tool_name": interrupt_value.get("tool_name", ""),
-                                        "tool_args": interrupt_value.get("tool_args", interrupt_value),
-                                        "order_data": interrupt_value.get("tool_args", interrupt_value),
-                                    })
+                            if not isinstance(interrupt_value, dict):
+                                continue
+                            payload = build_interrupt_event(interrupt_value)
+                            if payload.get("interrupt_type") == "hitl_approval":
+                                payload = await enrich_status_change(payload)
+                            yield sse_event("interrupt", payload)
 
                         # 保存当前累积的消息
                         if assistant_content:
-                            display_messages.append({
-                                "id": str(uuid.uuid4()),
-                                "role": "assistant",
-                                "content": assistant_content,
-                                "toolCalls": tool_calls_buffer,
-                                "timestamp": datetime.now().isoformat(),
-                            })
+                            display_messages.append(assistant_entry())
+                            assistant_appended = True
                         await agent_loader.save_display_messages(thread_id, display_messages)
                         await agent_loader.save_harness_trace(thread_id, harness_trace)
                         yield sse_event("done", {"thread_id": thread_id, "interrupted": True})
@@ -352,14 +451,12 @@ async def stream_chat_response(
                 if isinstance(chunk, dict):
                     ev_type = chunk.get("type", "")
                     if ev_type == "rubric_evaluation_start":
-                        event('grader.start')
                         # 评审器开始 grading → 进入审查阶段
                         if phase != "reviewing":
                             phase = "reviewing"
                             last_phase = "reviewing"
-                            yield sse_event("phase", {"phase": "reviewing", "label": "🔍 审查中"})
+                            yield sse_event("phase", {"phase": "reviewing", "label": "审查中"})
                     elif ev_type == "rubric_evaluation_end":
-                        event('grader.end', satisfied=chunk.get('result')=='satisfied', iteration=chunk.get('iteration',0))
                         # 评审器产出结构化判定 → 发射 review_result 事件
                         review_data = {
                             "verdict": chunk.get("result", ""),
@@ -403,6 +500,9 @@ async def stream_chat_response(
                         thinking_emitted = True
                     for tc in tool_call_chunks:
                         if isinstance(tc, dict):
+                            # 评审器的结构化调用不当作业务工具，别推给前端
+                            if tc.get("name") and INTERNAL_TOOL_PATTERN.search(tc["name"]):
+                                continue
                             if tc.get("name"):
                                 tool_calls_buffer.append({
                                     "id": tc.get("id", str(uuid.uuid4())),
@@ -424,13 +524,28 @@ async def stream_chat_response(
                 # ToolMessage → tool_result / tool_end
                 if token_type == "tool":
                     tool_name = getattr(token, "name", "unknown")
+                    if INTERNAL_TOOL_PATTERN.search(str(tool_name)):
+                        continue
                     tool_content = content if isinstance(content, str) else str(content)
-                    # 更新 buffer 中对应工具的状态
-                    for tc in tool_calls_buffer:
-                        if tc["name"] == tool_name and tc["status"] == "running":
-                            tc["result"] = tool_content[:1000]
-                            tc["status"] = "done"
-                            break
+                    # 更新 buffer 中对应工具的状态：优先按 tool_call_id 精确匹配
+                    # （并发工具同名/结果乱序时，只按名字会认错人）
+                    call_id = getattr(token, "tool_call_id", "")
+                    target = next(
+                        (
+                            tc for tc in tool_calls_buffer
+                            if call_id and tc["id"] == call_id and tc["status"] == "running"
+                        ),
+                        None,
+                    ) or next(
+                        (
+                            tc for tc in tool_calls_buffer
+                            if tc["name"] == tool_name and tc["status"] == "running"
+                        ),
+                        None,
+                    )
+                    if target is not None:
+                        target["result"] = tool_content[:1000]
+                        target["status"] = "done"
 
                     # 检测 TODO 工具调用，发射任务列表更新事件
                     if "todo" in tool_name.lower() or "task" in tool_name.lower():
@@ -452,6 +567,7 @@ async def stream_chat_response(
 
                     yield sse_event("tool_result", {
                         "name": tool_name,
+                        "id": getattr(token, "tool_call_id", ""),
                         "content": tool_content[:2000],
                     })
                     yield sse_event("tool_end", {
@@ -459,6 +575,7 @@ async def stream_chat_response(
                     })
                     # 工具跑完，模型接下来这段是新的一段话
                     pending_separator = True
+                    await maybe_persist()
                     continue
 
                 # AIMessage 纯文本 → token 事件
@@ -503,16 +620,13 @@ async def stream_chat_response(
                         elif "order" in ns_str:
                             source = "order"
                     yield sse_event("token", {"content": content, "source": source})
+                    # 生成过程中按间隔落库，断流后仍能看到已经写出的内容
+                    await maybe_persist()
 
         # ===== 流正常结束 =====
         if assistant_content:
-            display_messages.append({
-                "id": str(uuid.uuid4()),
-                "role": "assistant",
-                "content": assistant_content,
-                "toolCalls": tool_calls_buffer if tool_calls_buffer else None,
-                "timestamp": datetime.now().isoformat(),
-            })
+            display_messages.append(assistant_entry())
+            assistant_appended = True
 
         await agent_loader.save_display_messages(thread_id, display_messages)
         await agent_loader.save_harness_trace(thread_id, harness_trace)
@@ -529,6 +643,16 @@ async def stream_chat_response(
         yield sse_event("error", {"message": f"服务内部错误: {str(e)[:200]}"})
         yield sse_event("done", {"thread_id": thread_id, "interrupted": False})
     finally:
+        # 先落库再放锁：否则下一轮请求可能读到旧消息，再把这次的进度覆盖掉。
+        # 客户端断流（切换会话、关页面）会取消这个生成器，普通 await 会被立刻打断；
+        # shield 让最后一次写入继续跑完，避免这一轮对话在库里是空的。
+        if display_messages:
+            try:
+                await asyncio.wait_for(asyncio.shield(persist_progress()), timeout=3)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            except Exception as exc:
+                web_logger.warning(f"Failed to persist progress for {thread_id}: {exc}")
         reset_runtime(runtime_tokens)
         reset_sandbox(sandbox_token)
         if lease_acquired:
@@ -571,7 +695,11 @@ async def chat_stream(request: ChatRequest):
 async def chat_resume(thread_id: str, request: ResumeRequest):
     """中断恢复端点"""
     await agent_loader.initialize()
-    user_id = await agent_loader.get_conversation_user_id(thread_id) or "default_user"
+    # 会话归属查不到就是真的不存在（历史数据缺失 / 已被删除 / thread_id 是前端本地生成的）。
+    # 以前这里回落到 default_user，会凭空建一个没人用的身份和沙箱，还把错误吞掉。
+    user_id = await agent_loader.get_conversation_user_id(thread_id)
+    if not user_id:
+        raise HTTPException(status_code=404, detail="会话不存在或已删除，无法恢复")
 
     return StreamingResponse(
         stream_chat_response(
@@ -594,15 +722,38 @@ async def chat_resume(thread_id: str, request: ResumeRequest):
 async def chat_state(thread_id: str):
     """获取 Agent 状态（是否处于中断中）"""
     await agent_loader.initialize()
-    user_id = await agent_loader.get_conversation_user_id(thread_id) or "default_user"
+    user_id = await agent_loader.get_conversation_user_id(thread_id)
+    if not user_id:
+        raise HTTPException(status_code=404, detail="会话不存在或已删除")
     session = await agent_loader.get_session(user_id)
     config = agent_loader.create_config(thread_id, user_id)
     try:
         state = await session.agent.aget_state(config)
-        is_interrupted = bool(state.next) if state else False
-        return {"thread_id": thread_id, "interrupted": is_interrupted}
+        is_interrupted = bool(getattr(state, "next", None)) if state else False
+
+        # 刷新页面后前端拿不到 SSE 里的 interrupt 事件，这里把待审批内容一并返回，
+        # 否则用户只能看到一个"没有卡片的空白会话"。
+        payload = None
+        if is_interrupted:
+            for task in getattr(state, "tasks", ()) or ():
+                for item in getattr(task, "interrupts", ()) or ():
+                    value = getattr(item, "value", item)
+                    if not isinstance(value, dict):
+                        continue
+                    payload = build_interrupt_event(value)
+                    if payload.get("interrupt_type") == "hitl_approval":
+                        payload = await enrich_status_change(payload)
+                    break
+                if payload:
+                    break
+
+        return {
+            "thread_id": thread_id,
+            "interrupted": is_interrupted or payload is not None,
+            "interrupt": payload,
+        }
     except Exception:
-        return {"thread_id": thread_id, "interrupted": False}
+        return {"thread_id": thread_id, "interrupted": False, "interrupt": None}
 
 
 @router.get("/{thread_id}/history")

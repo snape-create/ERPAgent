@@ -2,6 +2,7 @@
 主入口：create_main_agent() + precompute_agent_context()
 DeepAgent 核心组装 — 严格遵循 Harness Engineering 架构
 """
+import hashlib
 import io
 import tarfile
 import fnmatch
@@ -59,14 +60,38 @@ def _upload_project_to_sandbox(sandbox) -> bool:
     try:
         sandbox.execute(f"mkdir -p '{remote_dir}'")
 
+        # 先把要传的文件列出来，用「路径 + 大小 + mtime」算一个指纹。
+        # 沙箱里记一份同名标记：容器还在、内容也没变时直接跳过上传。
+        # 否则每次重启后端（session 缓存清空）都要重传 12MB / 300+ 文件。
+        files = []
+        for file_path in sorted(PROJECT_ROOT.rglob("*")):
+            if not file_path.is_file():
+                continue
+            rel = str(file_path.relative_to(PROJECT_ROOT)).replace("\\", "/")
+            if _should_skip(rel):
+                continue
+            files.append((file_path, rel))
+
+        digest = hashlib.sha1()
+        for file_path, rel in files:
+            try:
+                stat = file_path.stat()
+            except OSError:
+                continue
+            digest.update(f"{rel}:{stat.st_size}:{int(stat.st_mtime)}".encode())
+        fingerprint = digest.hexdigest()[:16]
+
+        marker_path = "/workspace/.erp-bootstrap-fingerprint"
+        current = sandbox.execute(f"cat '{marker_path}' 2>/dev/null")
+        if current.exit_code == 0 and current.output.strip() == fingerprint:
+            agent_logger.info(
+                f"Project already in sandbox (fingerprint {fingerprint}), skip upload"
+            )
+            return True
+
         tar_stream = io.BytesIO()
         with tarfile.open(fileobj=tar_stream, mode="w:gz") as tar:
-            for file_path in sorted(PROJECT_ROOT.rglob("*")):
-                if not file_path.is_file():
-                    continue
-                rel = str(file_path.relative_to(PROJECT_ROOT)).replace("\\", "/")
-                if _should_skip(rel):
-                    continue
+            for file_path, rel in files:
                 tar.add(str(file_path), arcname=rel)
 
         tar_stream.seek(0)
@@ -95,6 +120,9 @@ def _upload_project_to_sandbox(sandbox) -> bool:
         )
         if unpack.exit_code != 0:
             raise RuntimeError(f"archive extraction failed: {unpack.output}")
+
+        # 记下这次传的内容指纹，下次 bootstrap 命中就跳过
+        sandbox.execute(f"printf '%s' '{fingerprint}' > '{marker_path}'")
 
         # 获取文件数量和总大小
         count_result = sandbox.execute(
@@ -323,6 +351,7 @@ def create_main_agent(
     from .middlewares.memory_consolidation import MemoryConsolidationMiddleware
     from .middlewares.warm_memory import WarmMemoryMiddleware, WARM_MEMORY_SLOT
     from .middlewares.sandbox_breaker import SandboxCircuitBreakerMiddleware
+    from .middlewares.order_intake import OrderIntakeMiddleware
     # Harness 阶段状态机 + 评审器
     from .harness import HarnessPhaseMiddleware, load_harness_config
     from .middlewares.review_gate import ReviewExecutionGate, SafeRubricMiddleware
@@ -351,6 +380,11 @@ def create_main_agent(
         sandbox_backend=sandbox_backend if managed_sandbox else None,
     )
 
+    # bootstrap 刚把整个项目（含 src/skills）拷进沙箱，这里直接认账，
+    # 省掉首轮逐文件同步的 14 次 RPC；沙箱重建时仍会走全量回填。
+    if managed_sandbox:
+        skills_sync_middleware.assume_synced()
+
     def _rehydrate_after_sandbox_rebuild(_replacement) -> None:
         bootstrap_sandbox(sandbox_backend)
         skills_sync_middleware.invalidate()
@@ -370,6 +404,7 @@ def create_main_agent(
         ),                                                            # 1. 沙箱健康检查 + 重建
         HarnessPhaseMiddleware(router_model=router_llm),               # 2. 混合路由 + rubric 注入
         ContextInjectionMiddleware(user_context=user_context),        # 3. 用户上下文注入
+        OrderIntakeMiddleware(router_model=router_llm),               # 3.5 订单意图路由 + 缺字段确定性中断
         WarmMemoryMiddleware(store=store, user_id=user_context.user_id),
         ProgressiveSkillsMiddleware(skill_catalog),
         skills_sync_middleware,                                       # 4. 基础 Skills 同步

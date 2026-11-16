@@ -20,6 +20,7 @@
 - 健康检查 + 自动重建故障容器
 - 超时回收闲置沙箱（默认 30 分钟）
 """
+import os
 import time
 import threading
 import uuid
@@ -30,7 +31,11 @@ from .custom_opensandbox import CustomOpenSandbox
 from .sandbox_setup import SandboxConfig, create_secure_sandbox
 from ..config import SANDBOX_IDLE_TIMEOUT_MINUTES, SANDBOX_WARM_POOL_SIZE
 from ..log_utils import sandbox_logger
-from ..observability import measured
+
+
+# 远程 MongoDB 首次连接要走 DNS + TCP + 认证，3 秒在公网抖动时容易误判为不可用。
+# 这里只影响沙箱缓存/孤儿回收，放宽阈值不会拖慢聊天主流程。
+MONGO_SELECTION_TIMEOUT_MS = int(os.getenv("MONGODB_SELECTION_TIMEOUT_MS", "10000"))
 
 
 # ============================================================
@@ -245,37 +250,42 @@ class SandboxManager:
         sandbox_logger.info(f"No warm/cached sandbox for {user_id}, creating new")
         return self._create_for_user(user_id)
 
-    @measured('sandbox.claim_attempt')
     def _claim_from_warm_pool(self, user_id: str) -> Optional[CustomOpenSandbox]:
-        """从预热池中认领一个空闲容器"""
+        """从预热池中认领一个空闲容器。
+
+        健康检查（Docker ping）和 Mongo 持久化都放到锁外：这两步都可能因为
+        daemon 无响应而阻塞，一旦在锁内卡住，所有对话请求都会排队等死。
+        """
         with self._lock:
-            for entry in self._entries.values():
-                if entry.state == SandboxState.WARM and entry.is_healthy():
-                    # 认领！
-                    entry.user_id = user_id
-                    entry.state = SandboxState.CLAIMED
-                    entry.claimed_at = datetime.now()
-                    entry.touch()
-                    self._user_map[user_id] = entry.container_name
+            candidates = [
+                entry for entry in self._entries.values()
+                if entry.state == SandboxState.WARM
+            ]
 
-                    sandbox_logger.info(
-                        f"Claimed warm sandbox {entry.container_name} for {user_id}"
-                    )
+        for entry in candidates:
+            if not entry.is_healthy():
+                continue
+            with self._lock:
+                # 期间可能被别的请求认领，重新确认状态
+                if entry.state != SandboxState.WARM:
+                    continue
+                entry.user_id = user_id
+                entry.state = SandboxState.CLAIMED
+                entry.claimed_at = datetime.now()
+                entry.touch()
+                self._user_map[user_id] = entry.container_name
 
-                    # 异步持久化到 MongoDB
-                    self._persist_to_mongodb(entry)
+            sandbox_logger.info(
+                f"Claimed warm sandbox {entry.container_name} for {user_id}"
+            )
 
-                    # 补充预热池
-                    threading.Thread(
-                        target=self.ensure_warm_pool,
-                        daemon=True,
-                    ).start()
-
-                    return entry.sandbox
+            # 锁外持久化与补池
+            self._persist_to_mongodb(entry)
+            threading.Thread(target=self.ensure_warm_pool, daemon=True).start()
+            return entry.sandbox
 
         return None
 
-    @measured('sandbox.create')
     def _create_for_user(self, user_id: str) -> CustomOpenSandbox:
         """为用户创建新容器"""
         # 正常 Web 链路由 AgentLoader 串行创建；这里仍做二次检查，防止其他调用方
@@ -339,7 +349,7 @@ class SandboxManager:
             mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
             db_name = os.getenv("MONGODB_DB_NAME", "erp_agent")
 
-            client = MongoClient(mongo_uri, serverSelectionTimeoutMS=3000)
+            client = MongoClient(mongo_uri, serverSelectionTimeoutMS=MONGO_SELECTION_TIMEOUT_MS)
             db = client[db_name]
 
             db.sandbox_cache.update_one(
@@ -362,7 +372,7 @@ class SandboxManager:
             mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
             db_name = os.getenv("MONGODB_DB_NAME", "erp_agent")
 
-            client = MongoClient(mongo_uri, serverSelectionTimeoutMS=3000)
+            client = MongoClient(mongo_uri, serverSelectionTimeoutMS=MONGO_SELECTION_TIMEOUT_MS)
             db = client[db_name]
 
             doc = db.sandbox_cache.find_one({"user_id": user_id})
@@ -424,7 +434,7 @@ class SandboxManager:
             mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
             db_name = os.getenv("MONGODB_DB_NAME", "erp_agent")
 
-            client = MongoClient(mongo_uri, serverSelectionTimeoutMS=3000)
+            client = MongoClient(mongo_uri, serverSelectionTimeoutMS=MONGO_SELECTION_TIMEOUT_MS)
             db = client[db_name]
             db.sandbox_cache.delete_one({"user_id": user_id})
             client.close()
@@ -474,6 +484,68 @@ class SandboxManager:
             self._entries.clear()
             self._user_map.clear()
         sandbox_logger.info("All sandboxes destroyed")
+
+    def destroy_warm_sandboxes(self) -> int:
+        """销毁预热池里的空闲容器（服务关停时调用）。
+
+        warm 容器没有任何用户数据，关停后没有恢复价值；不清理的话每次重启
+        都会遗留一个。已认领的用户容器不在这里处理，靠 MongoDB 映射恢复。
+        """
+        removed = 0
+        with self._lock:
+            warm = [e for e in self._entries.values() if e.state == SandboxState.WARM]
+            for entry in warm:
+                self._remove_entry(entry)
+                removed += 1
+        if removed:
+            sandbox_logger.info(f"Destroyed {removed} warm sandbox container(s)")
+        return removed
+
+    def cleanup_stale_warm(self) -> int:
+        """启动时兜底清理上次遗留的空闲 warm 容器。
+
+        Ctrl+C / 强杀时进程来不及执行关停钩子，warm 容器会留在 docker 里，
+        新进程又建一批，越积越多。这里在启动阶段扫一次：
+        只删 MongoDB 缓存里没有登记的 warm（登记过的是已认领的用户容器，不能删）。
+        缓存读不到就跳过，宁可留容器也不误删用户数据。
+        """
+        import docker
+
+        protected: set[str] = set()
+        try:
+            from pymongo import MongoClient
+
+            client = MongoClient(
+                os.getenv("MONGODB_URI", "mongodb://localhost:27017"),
+                serverSelectionTimeoutMS=MONGO_SELECTION_TIMEOUT_MS,
+            )
+            db = client[os.getenv("MONGODB_DB_NAME", "erp_agent")]
+            for doc in db.sandbox_cache.find({}, {"container_name": 1}):
+                name = doc.get("container_name")
+                if name:
+                    protected.add(name)
+        except Exception as exc:
+            sandbox_logger.warning(f"Skip stale warm cleanup, cache unreadable: {exc}")
+            return 0
+
+        removed = 0
+        try:
+            docker_client = docker.from_env(timeout=15)
+            for container in docker_client.containers.list(
+                filters={"name": "erp-sandbox-warm-"}
+            ):
+                name = getattr(container, "name", "") or ""
+                if not name.startswith("erp-sandbox-warm-") or name in protected:
+                    continue
+                container.remove(force=True)
+                removed += 1
+                sandbox_logger.info(f"Removed stale warm sandbox: {name}")
+        except Exception as exc:
+            sandbox_logger.warning(f"Stale warm cleanup failed: {exc}")
+
+        if removed:
+            sandbox_logger.info(f"Removed {removed} stale warm sandbox container(s)")
+        return removed
 
     # ============================================================
     # 超时回收

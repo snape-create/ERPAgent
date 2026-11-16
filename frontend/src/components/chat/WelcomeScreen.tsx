@@ -34,20 +34,26 @@ interface Props {
   onPromptClick: (prompt: string) => void;
 }
 
+/**
+ * 空状态：左对齐的一段说明 + 四个入口。
+ * 不再整体垂直居中——居中的一小块放在大画布中间，会显得页面是空的。
+ */
 export default function WelcomeScreen({ onPromptClick }: Props) {
   return (
     <div className="flex-1 min-h-0 overflow-y-auto">
-      <div className="mx-auto flex min-h-full w-full max-w-[640px] flex-col justify-center px-4 py-10">
-        <h1 className="text-[22px] font-medium text-ink text-center">
-          智能采购助手
+      {/* 垂直居中但略偏上：既不是贴顶留一大片空白，也不是正中的"悬浮小方块" */}
+      <div className="mx-auto flex min-h-full w-full max-w-[760px] flex-col justify-center px-6 pt-16 pb-20 -mt-6">
+        <p className="font-mono text-[11px] leading-none text-ink-3">采购工作台</p>
+
+        <h1 className="mt-3 text-[26px] font-semibold leading-[1.35] text-ink">
+          查库存、比供应商、下单走审批
         </h1>
-        <p className="mt-2 text-[13px] leading-[1.7] text-ink-3 text-center">
-          供应商分析、采购下单、库存预警、零件查询
-          <br className="hidden min-[420px]:block" />
-          写操作会停下来等你审批
+
+        <p className="mt-2 text-[13px] leading-[1.7] text-ink-3">
+          写操作停下来等你确认，拒绝则不产生任何单据
         </p>
 
-        <div className="mt-8 grid grid-cols-1 min-[420px]:grid-cols-2 gap-3">
+        <div className="mt-10 grid grid-cols-1 min-[520px]:grid-cols-2 gap-3">
           {CARDS.map((card) => (
             <CapabilityCardComponent
               key={card.title}

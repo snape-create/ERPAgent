@@ -81,7 +81,7 @@ export default function MessageList({ messages, streaming, showToolCalls }: Prop
       className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-4 md:px-6"
     >
       {/* 正文列封顶 672，与输入框同宽；长表格与公式不会把一行拉成一屏幕宽 */}
-      <div ref={contentRef} className="mx-auto w-full py-6 flex flex-col gap-6">
+      <div ref={contentRef} className="mx-auto w-full max-w-[760px] py-6 flex flex-col gap-6">
         {messages.map((msg, idx) => (
           <MessageBubble
             key={msg.id}

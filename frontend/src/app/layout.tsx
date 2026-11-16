@@ -20,7 +20,8 @@ const plexMono = IBM_Plex_Mono({
 
 const noto = Noto_Sans_SC({
   subsets: ["latin"],
-  weight: ["400", "500"],
+  // 补 600：正文里 `.markdown-body strong` 用的是 600，缺这一档会被浏览器合成假粗体
+  weight: ["400", "500", "600"],
   variable: "--font-noto",
   display: "swap",
   preload: false,

@@ -55,7 +55,9 @@ class CustomOpenSandbox(BaseSandbox):
     def _connect(self):
         """连接到 Docker 容器"""
         try:
-            self._client = docker.from_env()
+            # 加超时：daemon 卡死时不要让调用方无限等待（此前 Docker 不可用会把
+            # 整个对话接口挂住，因为调用发生在持有 SandboxManager 锁的路径上）
+            self._client = docker.from_env(timeout=15)
             self._container = self._client.containers.get(self._container_name)
             if self._container.status != "running":
                 raise RuntimeError(
