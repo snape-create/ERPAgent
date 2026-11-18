@@ -415,6 +415,13 @@ def set_mcp_server_enabled(name: str, enabled: bool) -> None:
     # 重置熔断（启用时需要能立即重连）并清工具缓存
     _config_mcp_fail_until = 0.0
     invalidate_cache()
+    # 图按用户缓存了装配时的工具集，配置变更后必须让下次请求重新建图。
+    try:
+        from ..agent.graph_cache import invalidate_all
+
+        invalidate_all()
+    except Exception as exc:  # 缓存模块不可用不影响开关本身
+        mcp_logger.warning(f"Failed to invalidate graph cache: {exc}")
     mcp_logger.info(f"MCP server '{name}' {'enabled' if enabled else 'disabled'}")
 
 

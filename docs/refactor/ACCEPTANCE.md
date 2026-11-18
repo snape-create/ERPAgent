@@ -53,6 +53,9 @@ curl -s localhost:2030/ok                                                     # 
 | 2026-11-18 | W1 实机联调（5 轮） | 主代理 | 对话：`thinking×2→phase→thinking(end)→token×36→done`；中断：`order_info_supplement` 卡片；resume(supplement)→`part_query` 工具四事件→二次补充卡片；resume(decisions=approve)→`hitl_approval` 卡片含解包后的 `tool_args`→审批后 `tool_result/tool_end/review_result/done`；`/state` 返回 `interrupted:true` + 卡片 | 通过 |
 | 2026-11-18 | W3 langgraph-api 升级调查 | codebuddy | `docs/refactor/reports/W3-langgraph-api-upgrade.md`（259 行）：6 个依赖面在 0.18.3 中仍存在；主要成本是依赖大版本跃迁；结论“现在升”。**注**：其前提“默认仍 inprocess”在 W1d 后已不成立，结论需按新的默认路径重估 | 有条件采纳 |
 
+| 2026-11-18 | W5 graph 工厂去阻塞 | codebuddy 实现 + 主代理实机 | 新增 `agent/graph_cache.py`（线程池装配 + 每用户缓存 + 进程预热），`graph.py` 只做配置解析；新增 `tests/test_graph_factory.py`；195 passed / ruff clean；**不带 `--allow-blocking`** 启动 server，实机 5 轮全过（对话 / 补充中断 / 二次 resume / 审批卡片 / approve 后 `tool_result+review_result+done`），`BlockingError` 全程 0 次；`order_create` 真实写入 Mock ERP（id=6, PO-W5-001, 20.0） | 通过 |
+| 2026-11-18 | W5 观察项 | 主代理 | 5 轮里 `Main agent created` 出现 2 次（预期 1 次），即缓存命中 3/5；未影响正确性，但需确认是否被 `_pending` 竞态或多实例调用触发。记入 W6 | 待跟进 |
+
 ## 4. 打回处理
 
 - 打回时在记录表写「失败项 + 复现命令 + 最小修复建议」，重新派单给同一执行者（附上次失败输出）。

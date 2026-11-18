@@ -47,6 +47,8 @@ app（网关，不打包）  →  erpflow（harness，可安装）  →  integra
 | ~~W1d~~ | ~~切默认到 server、删网关内 Agent 与沙箱职责~~ | — | — | 完成 | — |
 | **W2** | CI：`uv sync` + `ruff` + `pytest`（含边界测试） | 中 | 30min | codebuddy | 无 |
 | **W3** | 升级 `langgraph-api` 0.7 → 0.18（调查已完成，报告在 `reports/W3-*.md`） | 中 | 2~4h | 待排期（结论需按 server 为默认重估） | W1 |
+| ~~**W5**~~ | ~~graph 工厂去阻塞（线程池 + 图缓存 + 预热）~~ | — | — | **已完成**（不带 `--allow-blocking` 实机 5 轮通过） | — |
+| **W6** | 沙箱后端异步化：`SandboxBackendProxy` 延迟解析 + `before_agent` 里 `asyncio.to_thread`，消除首次建图等待；顺带查图缓存 5 轮里 2 次建图的竞态 | 中 | 3~4h | 待排期 | W5 |
 | **W4** | 文档/环境小卫生：`.env` 死键、`docs/ARCHITECTURE.md` 端点表补 `/api/mcp/*` | 低 | 20min | codebuddy | 无 |
 
 W1 完成后可删除：`app/services/agent_session.py`、网关 lifespan 中的沙箱段、`app/repositories/mongo.py` 的同步 Mongo 用法（若不再需要）。
