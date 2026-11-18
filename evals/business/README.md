@@ -28,7 +28,7 @@
 ## 运行
 
 ```bash
-.venv/bin/python -m unittest src.test.test_business_eval -q
+cd backend && uv run pytest tests/test_business_eval.py -q
 .venv/bin/python -m evals.business.run --dev --out evals/business/results/dev-new
 .venv/bin/python -m evals.business.run --out evals/business/results/test-v1
 ```

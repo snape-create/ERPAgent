@@ -1,0 +1,17 @@
+line-length = 240
+target-version = "py313"
+
+[lint]
+select = ["E", "F", "I", "UP", "W605"]
+ignore = ["E731", "E741"]
+
+[lint.per-file-ignores]
+# 评测脚本是作者刻意写成一行一语句的紧凑风格，不参与代码风格整改
+"tests/test_business_eval.py" = ["E701", "E702", "E401"]
+
+[lint.isort]
+known-first-party = ["erpflow", "app", "erp_mock"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

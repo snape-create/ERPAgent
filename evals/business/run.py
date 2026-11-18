@@ -60,15 +60,15 @@ def judge(case,erp,output,interrupts,error=None):
 
 
 async def _one(case):
-    from src.agent import main_agent as main
-    from src.agent.config import get_llm
-    from src.agent.schema import ProcurementContext
-    from src.agent.runtime_context import bind_runtime,reset_runtime
+    from erpflow.agent import build as main
+    from erpflow.config import get_llm
+    from erpflow.schema import ProcurementContext
+    from erpflow.runtime_context import bind_runtime,reset_runtime
     erp=ERP(case);registry=Registry();usage=Usage();interrupts=[];error=None;output=''
     store=InMemoryStore();state={};started=time.perf_counter()
     with ExitStack() as stack:
         for module,register in [('parts_tools','register_parts_tools'),('suppliers_tools','register_supplier_tools'),('inventory_tools','register_inventory_tools'),('order_tools','register_order_tools')]:
-            mod=importlib.import_module('src.mcp_server.tools.'+module)
+            mod=importlib.import_module('erpflow.integrations.erp.tools.'+module)
             stack.enter_context(patch.object(mod,'erp_client',erp));getattr(mod,register)(registry)
         names={t.name for t in registry.tools}|{'request_order_info','list_skills','read_skill','read_skill_resource','read_memory','remember'}
         def safe_builder(**kw):
@@ -78,12 +78,12 @@ async def _one(case):
             # Production prompts, review, skills and HITL kept; no host shell or web tools.
             return create_deep_agent(**kw)
         manager=SimpleNamespace(get_sandbox=lambda *a: (_ for _ in ()).throw(RuntimeError('evaluation uses state-only sandbox')))
-        stack.enter_context(patch.dict('sys.modules',{'src.agent.backends.sandbox_manager':SimpleNamespace(sandbox_manager=manager)}))
+        stack.enter_context(patch.dict('sys.modules',{'erpflow.backends.sandbox_manager':SimpleNamespace(sandbox_manager=manager)}))
         stack.enter_context(patch.object(main,'LocalShellBackend',lambda **kw:StateBackend()))
         stack.enter_context(patch.object(main,'create_deep_agent',safe_builder))
-        stack.enter_context(patch('src.agent.tools.mcp_client.load_mcp_tools_sync',return_value=registry.tools))
+        stack.enter_context(patch('erpflow.tools.mcp_client.load_mcp_tools_sync',return_value=registry.tools))
         stack.enter_context(patch.object(main,'get_llm',lambda **kw:get_llm(**{**kw,'timeout':60,'max_retries':0})))
-        stack.enter_context(patch('src.agent.jev_router.build_review_router',lambda cfg:get_llm(thinking=False,timeout=15,max_retries=0,max_tokens=400)))
+        stack.enter_context(patch('erpflow.review.build_review_router',lambda cfg:get_llm(thinking=False,timeout=15,max_retries=0,max_tokens=400)))
         stack.enter_context(patch.object(main,'MAX_MODEL_CALLS',12));stack.enter_context(patch.object(main,'MAX_TOOL_CALLS',20))
         uid='eval-'+case['id'];tokens=bind_runtime(uid,store)
         try:
@@ -139,7 +139,7 @@ def summarize(rows):
 
 
 async def run(args):
-    from src.agent.config import LLM_API_KEY,LLM_MODEL,LLM_BASE_URL
+    from erpflow.config import LLM_API_KEY,LLM_MODEL,LLM_BASE_URL
     if not LLM_API_KEY:raise SystemExit('Missing local DeepSeek API key')
     if LLM_BASE_URL.rstrip('/') not in ('https://api.deepseek.com','https://api.deepseek.com/v1'):raise SystemExit('Unexpected model endpoint; inspect before running')
     data=extended_cases() if args.extended else cases(args.dev)

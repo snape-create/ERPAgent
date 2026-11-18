@@ -1,0 +1,36 @@
+[project]
+name = "erp-agent-backend"
+version = "0.1.0"
+description = "ERP procurement agent: FastAPI gateway (app) over the erpflow harness"
+requires-python = ">=3.13"
+dependencies = [
+    # harness 层（Agent 编排、工具、沙箱、ERP 集成）
+    "erpflow-harness",
+    # 网关层
+    "fastapi>=0.115.0",
+    "langgraph-sdk>=0.1.51",
+    "motor>=3.5.0",
+    "pydantic>=2.0.0",
+    "pymongo>=4.8.0",
+    "python-dotenv>=1.0.0",
+    "uvicorn>=0.30.0",
+    # Mock ERP（外部系统模拟器，与网关同进程组启动，不打包）
+    "psycopg2-binary>=2.9",
+    "sqlalchemy>=2.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.14.11",
+]
+
+[tool.uv.workspace]
+members = ["packages/harness"]
+
+[tool.uv.sources]
+erpflow-harness = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "packages/harness", "tests"]

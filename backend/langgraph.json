@@ -1,0 +1,12 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "python_version": "3.13",
+  "dependencies": ["."],
+  "env": ".env",
+  "graphs": {
+    "lead_agent": "erpflow.graph:make_lead_agent"
+  },
+  "checkpointer": {
+    "path": "./packages/harness/erpflow/checkpointer.py:make_checkpointer"
+  }
+}

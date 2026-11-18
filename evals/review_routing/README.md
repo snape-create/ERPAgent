@@ -5,7 +5,7 @@
 WSL 项目：`/home/administrator/projects/ERP-AGENT-open-source`。
 开发分支：`codex/jev-review-evaluation`。
 改造前标签：`baseline/pre-jev-20260925`（`c317699`）。
-本次只扩展模糊请求路由模型的选择，不改原 `review_policy.py`、执行门控或 HITL。
+本次只扩展模糊请求路由模型的选择，不改原 `review/policy.py`、执行门控或 HITL。
 默认仍为 DeepSeek。修改配置后需重启后端，让已有 Agent Session 重建。
 
 ## 配置
@@ -39,7 +39,7 @@ Noul 检查项固定以 0.5 纳入。检查项质量未单独标注，当前评�
 
 ```bash
 cd /home/administrator/projects/ERP-AGENT-open-source
-.venv/bin/python -m unittest src.test.test_jev_router src.test.test_hybrid_review -q
+cd backend && uv run pytest tests/test_jev_router.py tests/test_hybrid_review.py -q
 # 真实调用，消耗两家 API 额度；先少量连通性验证
 .venv/bin/python -m evals.review_routing.run --smoke --output evals/review_routing/results/my-smoke
 # 一次完整运行；不执行业务工具，每个模型最多 200 次调用

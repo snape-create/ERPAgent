@@ -31,7 +31,10 @@ out/
 next-env.d.ts
 
 # ============ 生成文件 / 下载目录 ============
-src/download/
+backend/download/
+
+# ============ LangGraph Server 本地缓存 ============
+.langgraph_api/
 
 # ============ 日志 ============
 *.log
@@ -42,4 +45,4 @@ src/download/
 .DS_Store
 Thumbs.db
 learn-note/
-config/mcp.json
+backend/config/mcp.json
