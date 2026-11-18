@@ -7,12 +7,15 @@
 ```
 Frontend (Next.js :3000)
   │  SSE：thinking / token / tool_start / tool_result / phase / todo_update / interrupt / done
-Backend API (FastAPI :8000)
-  │  chat.py（流式对话、中断恢复、展示消息持久化）+ history.py（会话 CRUD）
-  │  MongoDBSaver（checkpoint）+ MongoDBStore（跨会话记忆）
-Agent Core (DeepAgent + LangGraph)
-  │  35+ 工具、2 个子 Agent、15 个中间件
-  │  MCP：默认进程内加载；也可切独立 MCP Server(:9000, Streamable HTTP)
+LangGraph Server (:2024)        ← uv run langgraph dev（Agent 跑在这一侧）
+  │  图入口：langgraph.json → erpflow.graph:make_lead_agent
+  │  checkpointer：erpflow/checkpointer.py（Mongo 优先，失败回退内存）
+  │  工具 / 子 Agent / 16 个中间件 / ERP 集成 / 沙箱预热池都在这一侧
+Gateway (FastAPI :8000)         ← uv run python -m app.gateway.app
+  │  routers/：chat.py（HTTP 语义）/ history.py（会话 CRUD）/ mcp.py（MCP 开关）
+  │  services/：chat_stream（会话·锁·租约）chat_turn（chunk→SSE）hitl sse
+  │  repositories/：conversations（会话/消息/追踪）
+  │  ⚠️ 当前仍以进程内方式装配 Agent（agent_session）；切 langgraph-sdk 是迁移剩余项
 ERP 后端 (:8081)
   │  仓库自带 Mock（FastAPI + PostgreSQL），实现 23 个业务接口
   └ 也可以改 ERP_BASE_URL 指向真实 Java ERP
@@ -72,13 +75,18 @@ ERP 后端 (:8081)
 ("user-preferences", <user_id>)         WARM 投影（兼容旧数据）
 ```
 
-读写集中在 `src/agent/memory/keeper.py`，没有跨记录事务；检索单类最多读 500 条。
+读写集中在 `backend/packages/harness/erpflow/memory/keeper.py`，没有跨记录事务；检索单类最多读 500 条。
 
 ## 6. 沙箱
 
 - 7 层防护：只读根文件系统、`--tmpfs /tmp`、内存/CPU 上限、网络隔离、`cap-drop ALL`、seccomp、PID 限制
 - 五态生命周期：预热池 → 认领 → MongoDB 缓存 → 新建 → 销毁
-- 创建与同步在 `src/agent/backends/`；镜像由 `docker/Dockerfile.sandbox` 构建
+- 镜像由 `docker/Dockerfile.sandbox` 构建
+- `backends/` 内按关注点分工：
+  - `sandbox_manager.py` 状态机与编排（池、认领、重建、租约、健康、空闲回收）
+  - `sandbox_entry.py` 条目元数据 + 容器创建（预热/用户容器共用一套初始化）
+  - `sandbox_cache.py` `sandbox_cache` 集合读写（user→container 映射）
+  - `sandbox_reaper.py` 启动期孤儿 warm 容器清理（只读命名前缀 + 缓存）
 
 ## 7. API 端点
 
@@ -91,15 +99,17 @@ ERP 后端 (:8081)
 | GET | `/api/history/{thread_id}/messages` | 会话消息 |
 | DELETE | `/api/history/{thread_id}` | 删除会话（硬删除） |
 | GET | `/api/download/{filename}` | 下载生成的文档/图表 |
+| GET | `/api/mcp/servers` | MCP server 列表及启用状态 |
+| POST | `/api/mcp/servers/{name}/toggle` | 启用/禁用某个 MCP server（body：`{"enabled": bool}`，下一条对话生效） |
 | GET | `/health` | 健康检查 |
 
 `resume` 的 `edit` 决策由后端补成框架要求的 `edited_action`，并把散参数包回 `order_data`。
 
 ## 8. 关键配置
 
-- `src/agent/harness_config.yaml`：审查策略（`mode: auto/always/never`、`strategy: hybrid/rules`）、路由超时、评分维度
-- `src/agent/subagents/configs/*.yaml`：子 Agent 工具集与提示词
-- `config/sandbox_config.toml`：沙箱资源与镜像
+- `backend/packages/harness/erpflow/review/config.yaml`：审查策略（`mode: auto/always/never`、`strategy: hybrid/rules`）、路由超时、评分维度
+- `backend/packages/harness/erpflow/subagents/configs/*.yaml`：子 Agent 工具集与提示词
+- `backend/config/sandbox_config.toml`：沙箱资源与镜像
 - `.env`：模型、数据库、ERP 地址、记忆开关（见 `.env.example`）
 
 ## 9. 评测与验收

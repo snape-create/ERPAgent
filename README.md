@@ -75,38 +75,52 @@ docker compose up -d
 如果要恢复示例数据、或重建环境，手动执行种子脚本（幂等，可重复跑）：
 
 ```bash
-docker compose exec -T postgres psql -U postgres -d erp_agent < src/erp_service/seed_data.sql
+docker compose exec -T postgres psql -U postgres -d erp_agent < backend/erp_mock/seed_data.sql
 ```
 
-脚本内容：6 家供应商、15 个零部件、15 条库存、3 张示例订单；文件在 `src/erp_service/seed_data.sql`。
+脚本内容：6 家供应商、15 个零部件、15 条库存、3 张示例订单；文件在 `backend/erp_mock/seed_data.sql`。
 
 ### 4. 安装 Python 依赖
 
 ```bash
+cd backend
 uv sync
 ```
 
-> 项目用 `pyproject.toml` + `uv.lock` 管理依赖，`uv sync` 会按 lock 建 `.venv` 并移除多余包。
+> 后端是 uv workspace 两层：`backend/pyproject.toml`（网关，不打包）+ `packages/harness`（`erpflow-harness`，可安装）。`uv sync` 一次装好两者并建 `backend/.venv`；`erp_mock/` 是 Mock ERP 源码目录，随目录直接运行。
 
 ### 5. 启动三个进程
 
 **终端 1：Mock ERP（:8081）**
 
 ```bash
-python -m src.erp_service.main
+cd backend
+uv run python -m erp_mock.main
 ```
 
 这是一个 FastAPI + PostgreSQL 的本地 ERP，实现了 Agent 需要的 23 个业务接口。要接真实 ERP 时这一步不用起，改 `.env` 的 `ERP_BASE_URL` 即可。
 
-**终端 2：后端 API（:8000）**
+**终端 2：Agent 服务（LangGraph Server，:2024）**
 
 ```bash
-python -m src.api_view.web_main
+cd backend
+uv run langgraph dev --no-browser --no-reload
 ```
+
+图入口在 `langgraph.json`：`erpflow.graph:make_lead_agent`，checkpointer 由 `erpflow/checkpointer.py` 提供。
+
+**终端 3：后端网关（:8000）**
+
+```bash
+cd backend
+uv run python -m app.gateway.app
+```
+
+> 两个入口都用 `python -m`，cwd 自动进 `sys.path`，不需要设置 `PYTHONPATH`。
 
 23 个 ERP 工具默认进程内加载，不需要单独启动 MCP Server。
 
-**终端 3：前端（:3000）**
+**终端 4：前端（:3000）**
 
 ```bash
 cd frontend
@@ -118,7 +132,7 @@ npm run dev
 
 ## 可选：接入外部 MCP
 
-项目默认只加载内置的 ERP 工具。要接第三方 MCP 服务，在项目根目录新建 `config/mcp.json`（该文件默认不存在）：
+项目默认只加载内置的 ERP 工具。要接第三方 MCP 服务，新建 `backend/config/mcp.json`（该文件默认不存在）：
 
 ```json
 {
@@ -148,31 +162,53 @@ npm run dev
 ERP_BASE_URL=http://your-erp-host:8081
 ```
 
-接口契约见 `src/erp_service/main.py`（23 个接口）。接了真实 ERP 就不用启动 Mock。
+接口契约见 `backend/erp_mock/main.py`（23 个接口）。接了真实 ERP 就不用启动 Mock。
 
 ## 目录结构
 
+后端是 **两层单向依赖**：`app`（网关）可以 import `erpflow`，**`erpflow` 绝不能 import `app`**——由 `tests/test_harness_boundary.py` 静态扫描守住。
+
 ```
-├── frontend/               # Next.js 前端
-├── src/
-│   ├── api_view/           # FastAPI Web 层（chat / history / 下载）
-│   ├── agent/              # Agent、中间件、工具、记忆、沙箱后端
-│   ├── mcp_server/         # 23 个 ERP 工具的 MCP 网关
-│   ├── erp_service/        # Mock ERP（FastAPI + PostgreSQL）+ 种子 SQL
-│   └── skills/             # 技能文件（按需加载）
-├── config/                 # 可选外部 MCP（mcp.json）、沙箱配置
-├── docker/                 # 沙箱镜像 Dockerfile
-├── evals/                  # 业务验收与路由评测
-├── docs/                   # 架构说明与验收记录
-├── compose.yaml            # MongoDB / PostgreSQL
-├── pyproject.toml / uv.lock
+├── frontend/                    # Next.js 前端
+├── backend/
+│   ├── app/                     # 网关层 app.*（不打包，python -m app.gateway.app）
+│   │   ├── gateway/             #   FastAPI 装配 + routers（chat / history / mcp）
+│   │   ├── services/            #   应用服务：Agent 会话、SSE 编排
+│   │   ├── repositories/        #   数据访问：Mongo / 会话消息
+│   │   └── mcp_server/          #   独立 MCP Server 进程（:9000，可选）
+│   ├── packages/harness/        # 核心层 erpflow-harness（可安装、可独立演进）
+│   │   └── erpflow/
+│   │       ├── graph.py         #   LangGraph Server 图入口（make_lead_agent）
+│   │       ├── checkpointer.py  #   checkpointer 工厂（Mongo / 内存兜底）
+│   │       ├── agent/           #   Agent 装配（build）+ 沙箱引导（bootstrap）
+│   │       ├── middlewares/ memory/           #   中间件 / 三层记忆
+│   │       ├── review/          #   阶段机 + 路由策略 + 决策模型适配（config.yaml）
+│   │       ├── skills/          #   技能加载与渐进披露
+│   │       ├── backends/        #   Docker 沙箱 + 池维护 + 孤儿清理
+│   │       ├── tools/           #   自定义工具 + MCP 客户端
+│   │       ├── integrations/erp #   ERP HTTP 客户端 + 23 个领域工具（唯一实现）
+│   │       ├── subagents/       #   YAML 声明式子 Agent
+│   │       ├── store.py         #   MongoDBStore + 进程级单例
+│   │       └── config/          #   配置单一入口：paths / sandbox / settings / llm
+│   ├── erp_mock/                # Mock ERP（FastAPI + PostgreSQL）+ 种子 SQL
+│   ├── skills/                  # 技能数据资产（按需加载）
+│   ├── config/                  # 沙箱 TOML、外部 MCP 配置
+│   ├── tests/                   # 扁平 pytest + 架构边界守卫
+│   ├── langgraph.json           # LangGraph Server 入口清单
+│   ├── pyproject.toml           # workspace 根（网关依赖，不打包）
+│   ├── ruff.toml
+│   └── uv.lock
+├── docker/                      # 沙箱镜像 Dockerfile
+├── evals/                       # 业务验收与路由评测
+├── docs/                        # 架构说明与验收记录
+├── compose.yaml                 # MongoDB / PostgreSQL
 └── .env.example
 ```
 
 ## 常见问题
 
 **前端能打开，但发消息没反应**
-后端没起或端口不对。先看 http://localhost:8000/health 是否返回 `{"status":"ok"}`。
+后端没起或端口不对。先看 http://localhost:8000/health 是否返回 `{"status":"healthy"}`。
 
 **报沙箱镜像不存在**
 先执行第 2 步构建 `erp-agent-sandbox:latest`，并确认 `.env` 的 `SANDBOX_IMAGE` 与镜像名一致。
@@ -194,6 +230,5 @@ ERP_BASE_URL=http://your-erp-host:8081
 
 ## 已知问题
 
-- 联网搜索的默认模型（`WEB_SEARCH_MODEL` 未配置时）与测试断言不一致，`src/test/test_web_search.py` 有一条用例失败；`.env` 显式配置后行为正常
 - 断流时保存的是半截回答，没有 `partial` 标记，后续追问会把它带进上下文
 - 冷启动首条消息较慢：外部 MCP 连接、项目文件上传沙箱、Skills 首次全量同步各占数秒

@@ -2,11 +2,11 @@
 
 ## 混合审查更新
 
-当前默认使用 `review.strategy: hybrid`：明确场景按规则判断，模糊请求调用现有 DeepSeek 模型，执行记录可升级审查。无需新增 Key；模糊请求会增加一次有超时限制的路由调用。修改 `src/agent/harness_config.yaml` 后重启后端生效。
+当前默认使用 `review.strategy: hybrid`：明确场景按规则判断，模糊请求调用现有 DeepSeek 模型，执行记录可升级审查。无需新增 Key；模糊请求会增加一次有超时限制的路由调用。修改 `backend/packages/harness/erpflow/review/config.yaml` 后重启后端生效。
 
 可测试“你好”“什么是库存，请查询缺货零件”“沿用刚才的方案，把第二家的量翻倍”。检查日志 Review route 与 Harness trace 中的 review_decision。订单写入仍须审批；写工具或子任务委派后评审未通过，不自动重放整轮任务。
 
-离线回归：`.venv/bin/python -m unittest src.test.test_hybrid_review -v`。
+离线回归：`cd backend && uv run pytest tests/test_hybrid_review.py -v`。
 本次修改前代码标签为 `review-before-hybrid-20260917`，可用独立 git worktree 对照；不要使用硬重置覆盖本地改动。
 
 ## 本次修复
@@ -40,16 +40,16 @@
 终端 1：ERP 后端（Mock，端口 8081，提供业务数据）
 
 ```bash
-cd ~/github_repo/ERP-AGENT-open-source
+cd ~/github_repo/ERP-AGENT-open-source/backend
 # 先确保 PostgreSQL 已启动：sudo docker compose up -d postgres
-.venv/bin/python -m src.erp_service.main
+uv run python -m erp_mock.main
 ```
 
 终端 2：后端（已内嵌 23 个 ERP MCP 工具）
 
 ```bash
-cd ~/github_repo/ERP-AGENT-open-source
-.venv/bin/python -m src.api_view.web_main
+cd ~/github_repo/ERP-AGENT-open-source/backend
+uv run python -m app.gateway.app
 ```
 
 终端 3：前端
@@ -65,16 +65,15 @@ npm run dev
 
 > 已有真实 ERP 时，终端 1 无需启动，直接改 .env 的 `ERP_BASE_URL` 指向真实服务即可。
 > 旧方式（独立 MCP Server :9000，Streamable HTTP）仍支持：先在 .env 设 `MCP_USE_EMBEDDED=false`，
-> 再 `python -m src.mcp_server.server_main` 单独启动。如需旧协议再加 `MCP_TRANSPORT=sse`。
+> 再 `cd backend && uv run python -m app.mcp_server.main` 单独启动。如需旧协议再加 `MCP_TRANSPORT=sse`。
 
 ## 验证记忆
 
 先执行离线测试：
 
 ```bash
-cd ~/projects/ERP-AGENT-open-source
-.venv/bin/python -m src.test.test_memory_layer
-.venv/bin/python -m unittest src.test.test_memory_integration -v
+cd ~/github_repo/ERP-AGENT-open-source/backend
+uv run pytest tests/test_memory_layer.py tests/test_memory_integration.py -v
 ```
 
 网页使用同一用户：在会话 A 说“以后用柱状图”，新建会话 B 请求展示数据，确认偏好生效。
