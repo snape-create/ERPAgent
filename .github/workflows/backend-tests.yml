@@ -1,0 +1,40 @@
+name: Backend Tests
+
+on:
+  push:
+    paths:
+      - "backend/**"
+      - ".github/workflows/**"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/**"
+
+env:
+  LANGSMITH_TRACING: "false"
+
+jobs:
+  test:
+    name: lint-and-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Ruff check
+        run: uv run ruff check .
+
+      - name: Pytest
+        run: uv run pytest tests/ -q
