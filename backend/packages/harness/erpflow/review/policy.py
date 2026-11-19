@@ -5,12 +5,19 @@ import asyncio
 import json
 import re
 import uuid
-from typing import Literal
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..log_utils import agent_logger
+
+if TYPE_CHECKING:
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import BaseMessage
+
+    from .phase import HarnessPhaseState
 
 
 class ReviewRoute(BaseModel):
@@ -44,7 +51,7 @@ checks 只选当前用户要求涉及的检查项，不额外要求图表。reas
 """
 
 
-def turn_start(messages):
+def turn_start(messages: Sequence[BaseMessage]) -> int:
     for i in range(len(messages) - 1, -1, -1):
         m = messages[i]
         if getattr(m, "type", "") == "human" and not getattr(m, "name", None) == "rubric_grader":
@@ -53,24 +60,26 @@ def turn_start(messages):
     return 0
 
 
-def reset_grading(rubric=""):
+def reset_grading(rubric: str = "") -> dict[str, Any]:
     return {"_rubric_iterations": 0, "_rubric_status": None,
             "_rubric_evaluations": [], "_rubric_criteria": [],
             "_current_grading_run_id": str(uuid.uuid4()), "_active_rubric": rubric}
 
 
-def compose_rubric(route, config):
+def compose_rubric(route: ReviewRoute, config: dict[str, Any]) -> str:
     template = config.get("rubrics", {}).get(route.task_type, "")
     checks = "\n".join(CHECKS[key] for key in dict.fromkeys(route.checks))
     return BASELINE + "\n仅在本轮任务适用时检查：\n" + template + "\n" + checks
 
 
 class ReviewPolicy:
-    def __init__(self, config, model=None):
+    def __init__(
+        self, config: dict[str, Any], model: BaseChatModel | None = None
+    ) -> None:
         self.config = config
         self.model = model
 
-    def rule(self, state):
+    def rule(self, state: HarnessPhaseState) -> ReviewRoute | None:
         from .phase import detect_task_type, latest_human_text, should_use_grader
         messages = state.get("messages", [])
         text = latest_human_text(messages)
@@ -96,7 +105,7 @@ class ReviewPolicy:
             return ReviewRoute(decision="review", task_type=task, reason="明确数据处理或交付请求", checks=["constraints", "sources"])
         return None
 
-    def input(self, state):
+    def input(self, state: HarnessPhaseState) -> list[BaseMessage]:
         history = [{"role": getattr(m, "type", ""), "content": str(getattr(m, "content", ""))[:800]}
                    for m in state.get("messages", [])[-6:]]
         payload = {"recent_messages": history, "plan": str(state.get("plan") or "")[:1200],
@@ -108,11 +117,13 @@ class ReviewPolicy:
             raise RuntimeError("review router unavailable")
         return self.model.with_structured_output(ReviewRoute)
 
-    def fallback(self, exc):
+    def fallback(self, exc: BaseException) -> ReviewRoute:
         agent_logger.warning(f"Review router fallback: {type(exc).__name__}")
         return ReviewRoute(decision="review", reason="路由不可用或输出无效，保守审查")
 
-    def finish(self, state, route, source):
+    def finish(
+        self, state: HarnessPhaseState, route: ReviewRoute, source: str
+    ) -> dict[str, Any]:
         explicit = bool(state.get("rubric")) and not state.get("_harness_rubric_source") and not state.get("_active_rubric")
         rubric = state["rubric"] if explicit else (compose_rubric(route, self.config) if route.decision != "skip" else "")
         if explicit:
@@ -127,10 +138,10 @@ class ReviewPolicy:
         agent_logger.info(f"Review route: {decision['decision']} ({source})")
         return update
 
-    def explicit(self, state):
+    def explicit(self, state: HarnessPhaseState) -> bool:
         return bool(state.get("rubric")) and not state.get("_harness_rubric_source") and not state.get("_active_rubric")
 
-    def start(self, state):
+    def start(self, state: HarnessPhaseState) -> dict[str, Any]:
         if self.explicit(state):
             return self.finish(state, ReviewRoute(decision="review", reason="调用方提供标准"), "explicit")
         route = self.rule(state)
@@ -144,7 +155,7 @@ class ReviewPolicy:
                 route, source = self.fallback(exc), "fallback"
         return self.finish(state, route, source)
 
-    async def astart(self, state):
+    async def astart(self, state: HarnessPhaseState) -> dict[str, Any]:
         if self.explicit(state):
             return self.finish(state, ReviewRoute(decision="review", reason="调用方提供标准"), "explicit")
         route = self.rule(state)

@@ -10,9 +10,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .config import DEFAULT_MEMORY_CONFIG, MemoryConfig
+
+if TYPE_CHECKING:
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import BaseMessage
 
 # ---------------------------------------------------------------- 关键词表
 
@@ -65,7 +69,7 @@ TASK_TYPE_KEYWORDS = {
 
 # ---------------------------------------------------------------- 消息工具
 
-def _role_of(message: Any) -> str:
+def _role_of(message: BaseMessage) -> str:
     role = getattr(message, "type", None)
     if isinstance(role, str) and role:
         return role
@@ -75,7 +79,7 @@ def _role_of(message: Any) -> str:
     return message.__class__.__name__.lower()
 
 
-def _content_of(message: Any) -> str:
+def _content_of(message: BaseMessage) -> str:
     content = getattr(message, "content", None)
     if isinstance(content, str):
         return content
@@ -90,14 +94,14 @@ def _content_of(message: Any) -> str:
     return ""
 
 
-def _tool_calls_of(message: Any) -> list[dict]:
+def _tool_calls_of(message: BaseMessage) -> list[dict[str, Any]]:
     calls = getattr(message, "tool_calls", None)
     if isinstance(calls, list):
         return [c for c in calls if isinstance(c, dict)]
     return []
 
 
-def _tool_name_of(message: Any) -> str:
+def _tool_name_of(message: BaseMessage) -> str:
     name = getattr(message, "name", None)
     return str(name) if isinstance(name, str) else ""
 
@@ -153,7 +157,7 @@ def _extract_supplier_names(text: str) -> list[str]:
     return names
 
 
-def _collect_tool_entities(messages: Sequence[Any]) -> dict[str, list[str]]:
+def _collect_tool_entities(messages: Sequence[BaseMessage]) -> dict[str, list[str]]:
     """从工具调用参数里收集实体（供应商、零部件）。
 
     判定规则（按优先级）：
@@ -184,7 +188,7 @@ def _collect_tool_entities(messages: Sequence[Any]) -> dict[str, list[str]]:
 
 
 def extract_preferences(
-    messages: Sequence[Any],
+    messages: Sequence[BaseMessage],
     config: MemoryConfig | None = None,
     max_messages: int = 30,
 ) -> dict[str, Any]:
@@ -264,7 +268,7 @@ def _classify(text: str) -> str:
 
 
 def summarize_episode(
-    messages: Sequence[Any],
+    messages: Sequence[BaseMessage],
     config: MemoryConfig | None = None,
     thread_id: str = "",
 ) -> dict[str, Any]:
@@ -340,7 +344,11 @@ _LLM_EXTRACT_PROMPT = """你是记忆抽取器。从下面这段对话里抽取�
 输出 JSON："""
 
 
-def llm_extract_preferences(messages: Sequence[Any], llm, max_messages: int = 20) -> dict[str, Any]:
+def llm_extract_preferences(
+    messages: Sequence[BaseMessage],
+    llm: BaseChatModel | None,
+    max_messages: int = 20,
+) -> dict[str, Any]:
     """可选的 LLM 抽取；返回空 dict 表示失败，调用方回退到规则抽取。"""
     import json
 

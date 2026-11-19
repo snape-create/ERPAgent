@@ -13,7 +13,8 @@
 """
 from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware, Runtime
+from langchain.agents.middleware import AgentMiddleware, AgentState, Runtime
+from langgraph.store.base import BaseStore
 
 from ..log_utils import middleware_logger
 from ..memory.config import DEFAULT_MEMORY_CONFIG, MemoryConfig
@@ -22,15 +23,19 @@ from ..memory.keeper import MemoryKeeper
 from ..memory.run_config import current_thread_id
 
 
-class MemoryUpdateMiddleware(AgentMiddleware):
+class MemoryUpdateMiddleware(AgentMiddleware[AgentState[Any], None, Any]):
     """用户偏好自动更新中间件（WARM 层写入口）。"""
 
     # 保留旧常量，避免其它模块引用失效
     CHART_KEYWORDS = CHART_KEYWORDS
     OUTPUT_KEYWORDS = OUTPUT_KEYWORDS
 
-    def __init__(self, store=None, user_id: str = "default_user",
-                 config: MemoryConfig | None = None):
+    def __init__(
+        self,
+        store: BaseStore | None = None,
+        user_id: str = "default_user",
+        config: MemoryConfig | None = None,
+    ) -> None:
         self._store = store
         self._user_id = user_id or "default_user"
         self._config = config or DEFAULT_MEMORY_CONFIG
@@ -41,7 +46,9 @@ class MemoryUpdateMiddleware(AgentMiddleware):
     def name(self) -> str:
         return "MemoryUpdateMiddleware"
 
-    def after_agent(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
+    def after_agent(
+        self, state: AgentState[Any], runtime: Runtime[None]
+    ) -> dict[str, Any] | None:
         """Agent 执行后提取并合并用户偏好。任何异常都不能影响主流程。"""
         if self._store is None:
             return None
@@ -83,5 +90,5 @@ class MemoryUpdateMiddleware(AgentMiddleware):
         return None
 
     @staticmethod
-    def _thread_id(runtime: Runtime) -> str:
+    def _thread_id(runtime: Runtime[None]) -> str:
         return current_thread_id(runtime)

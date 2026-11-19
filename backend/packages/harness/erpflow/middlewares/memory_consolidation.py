@@ -12,7 +12,8 @@
 """
 from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware, Runtime
+from langchain.agents.middleware import AgentMiddleware, AgentState, Runtime
+from langgraph.store.base import BaseStore
 
 from ..log_utils import middleware_logger
 from ..memory.config import DEFAULT_MEMORY_CONFIG, MemoryConfig
@@ -20,11 +21,15 @@ from ..memory.keeper import MemoryKeeper
 from ..memory.run_config import current_thread_id
 
 
-class MemoryConsolidationMiddleware(AgentMiddleware):
+class MemoryConsolidationMiddleware(AgentMiddleware[AgentState[Any], None, Any]):
     """会话归档 + 遗忘扫描中间件。"""
 
-    def __init__(self, store=None, user_id: str = "default_user",
-                 config: MemoryConfig | None = None):
+    def __init__(
+        self,
+        store: BaseStore | None = None,
+        user_id: str = "default_user",
+        config: MemoryConfig | None = None,
+    ) -> None:
         self._store = store
         self._user_id = user_id or "default_user"
         self._config = config or DEFAULT_MEMORY_CONFIG
@@ -34,7 +39,9 @@ class MemoryConsolidationMiddleware(AgentMiddleware):
     def name(self) -> str:
         return "MemoryConsolidationMiddleware"
 
-    def after_agent(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
+    def after_agent(
+        self, state: AgentState[Any], runtime: Runtime[None]
+    ) -> dict[str, Any] | None:
         if self._store is None:
             return None
 
@@ -78,5 +85,5 @@ class MemoryConsolidationMiddleware(AgentMiddleware):
         return None
 
     @staticmethod
-    def _thread_id(runtime: Runtime) -> str:
+    def _thread_id(runtime: Runtime[None]) -> str:
         return current_thread_id(runtime)

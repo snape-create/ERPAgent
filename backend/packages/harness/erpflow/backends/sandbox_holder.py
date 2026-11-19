@@ -10,17 +10,22 @@ from __future__ import annotations
 
 from contextvars import ContextVar, Token
 from threading import RLock
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .sandbox_proxy import SandboxBackendProxy
 
 DEFAULT_USER_ID = "default_user"
-_request_sandbox: ContextVar[Any | None] = ContextVar(
+_request_sandbox: ContextVar[SandboxBackendProxy | None] = ContextVar(
     "erp_agent_request_sandbox", default=None
 )
-_sandboxes_by_user: dict[str, Any] = {}
+_sandboxes_by_user: dict[str, SandboxBackendProxy] = {}
 _registry_lock = RLock()
 
 
-def set_sandbox(sandbox: Any | None, user_id: str = DEFAULT_USER_ID) -> None:
+def set_sandbox(
+    sandbox: SandboxBackendProxy | None, user_id: str = DEFAULT_USER_ID
+) -> None:
     """注册或移除某位用户的稳定沙箱 Proxy。"""
     with _registry_lock:
         if sandbox is None:
@@ -29,7 +34,7 @@ def set_sandbox(sandbox: Any | None, user_id: str = DEFAULT_USER_ID) -> None:
             _sandboxes_by_user[user_id] = sandbox
 
 
-def get_sandbox(user_id: str | None = None) -> Any | None:
+def get_sandbox(user_id: str | None = None) -> SandboxBackendProxy | None:
     """获取当前请求的沙箱；非请求上下文时可按用户查注册表。"""
     sandbox = _request_sandbox.get()
     if sandbox is not None:
@@ -38,14 +43,14 @@ def get_sandbox(user_id: str | None = None) -> Any | None:
         return _sandboxes_by_user.get(user_id or DEFAULT_USER_ID)
 
 
-def bind_sandbox(user_id: str) -> Token[Any | None]:
+def bind_sandbox(user_id: str) -> Token[SandboxBackendProxy | None]:
     """将某位用户的沙箱绑定到当前协程，返回可在 finally 中复位的 token。"""
     with _registry_lock:
         sandbox = _sandboxes_by_user.get(user_id)
     return _request_sandbox.set(sandbox)
 
 
-def reset_sandbox(token: Token[Any | None]) -> None:
+def reset_sandbox(token: Token[SandboxBackendProxy | None]) -> None:
     """结束请求时恢复上层 ContextVar 值。"""
     _request_sandbox.reset(token)
 

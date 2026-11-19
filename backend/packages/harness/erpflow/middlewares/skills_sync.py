@@ -18,17 +18,22 @@ Skill 标准结构：
       procurement-analysis/
         SKILL.md
 """
+from __future__ import annotations
+
 import asyncio
 import hashlib
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from langchain.agents.middleware import AgentMiddleware, Runtime
+from langchain.agents.middleware import AgentMiddleware, AgentState, Runtime
 
 from ..log_utils import middleware_logger
 
+if TYPE_CHECKING:
+    from ..backends.sandbox_proxy import SandboxBackendProxy
 
-class SkillsSyncMiddleware(AgentMiddleware):
+
+class SkillsSyncMiddleware(AgentMiddleware[AgentState[Any], None, Any]):
     """
     技能同步中间件（Harness — 完整文件夹级增量同步）
 
@@ -43,7 +48,11 @@ class SkillsSyncMiddleware(AgentMiddleware):
     - 本地执行无需同步，仅校验技能文件完整性
     """
 
-    def __init__(self, skills_dir: str | Path | None = None, sandbox_backend=None):
+    def __init__(
+        self,
+        skills_dir: str | Path | None = None,
+        sandbox_backend: SandboxBackendProxy | None = None,
+    ) -> None:
         self._skills_dir = Path(skills_dir) if skills_dir else None
         self._sandbox_backend = sandbox_backend
         # 文件级哈希缓存：relative_path → file_md5
@@ -60,7 +69,9 @@ class SkillsSyncMiddleware(AgentMiddleware):
     def name(self) -> str:
         return "SkillsSyncMiddleware"
 
-    def before_agent(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
+    def before_agent(
+        self, state: AgentState[Any], runtime: Runtime[None]
+    ) -> dict[str, Any] | None:
         """
         每次 Agent 执行前增量同步技能文件
 
@@ -72,7 +83,7 @@ class SkillsSyncMiddleware(AgentMiddleware):
         return None
 
     async def abefore_agent(
-        self, state: Any, runtime: Runtime
+        self, state: AgentState[Any], runtime: Runtime[None]
     ) -> dict[str, Any] | None:
         """避免在 FastAPI 的 SSE 事件循环内执行 Docker 文件 I/O。"""
         await asyncio.to_thread(self.sync_now)
@@ -95,7 +106,7 @@ class SkillsSyncMiddleware(AgentMiddleware):
         else:
             self._validate_local_skills()
 
-    def _validate_local_skills(self):
+    def _validate_local_skills(self) -> None:
         """校验本地技能文件完整性"""
         skill_count = 0
         for skill_md in self._skills_dir.rglob("SKILL.md"):
@@ -112,7 +123,7 @@ class SkillsSyncMiddleware(AgentMiddleware):
             f"Skills validated: {skill_count} skills in {self._skills_dir}"
         )
 
-    def _sync_to_sandbox(self):
+    def _sync_to_sandbox(self) -> None:
         """
         增量同步技能文件到沙箱
 
@@ -246,7 +257,7 @@ class SkillsSyncMiddleware(AgentMiddleware):
             f"Skills assumed synced by bootstrap: {len(self._file_hashes)} files"
         )
 
-    def invalidate(self):
+    def invalidate(self) -> None:
         """手动失效缓存，强制下次完整同步（新 Skill 安装后调用）"""
         self._file_hashes.clear()
         self._last_synced_files.clear()

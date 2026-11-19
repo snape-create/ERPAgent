@@ -111,7 +111,7 @@ class MemoryItem:
         }
 
     @classmethod
-    def from_dict(cls, data: Any) -> MemoryItem | None:
+    def from_dict(cls, data: object) -> MemoryItem | None:
         """从 Store 里的 dict 还原；脏数据返回 None 而不是抛异常。"""
         if not isinstance(data, dict):
             return None

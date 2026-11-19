@@ -10,13 +10,13 @@
 import threading
 from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware, Runtime
+from langchain.agents.middleware import AgentMiddleware, AgentState, Runtime
 
 from ..log_utils import middleware_logger
 from ..schema import ProcurementContext
 
 
-class ContextInjectionMiddleware(AgentMiddleware):
+class ContextInjectionMiddleware(AgentMiddleware[AgentState[Any], None, Any]):
     """
     用户上下文注入中间件（请求级隔离）
 
@@ -31,7 +31,7 @@ class ContextInjectionMiddleware(AgentMiddleware):
     - 线程安全：使用 threading.Lock 保护并发读写
     """
 
-    def __init__(self, user_context: ProcurementContext | None = None):
+    def __init__(self, user_context: ProcurementContext | None = None) -> None:
         # 默认上下文（仅作为 fallback）
         self._default_context = user_context or ProcurementContext()
         # 请求级隔离存储：thread_id → ProcurementContext
@@ -43,7 +43,9 @@ class ContextInjectionMiddleware(AgentMiddleware):
     def name(self) -> str:
         return "ContextInjectionMiddleware"
 
-    def before_agent(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
+    def before_agent(
+        self, state: AgentState[Any], runtime: Runtime[None]
+    ) -> dict[str, Any] | None:
         """在 Agent 执行前注入用户上下文"""
         # 从 runtime 获取当前线程 ID
         thread_id = self._get_thread_id(runtime)
@@ -58,7 +60,9 @@ class ContextInjectionMiddleware(AgentMiddleware):
         # 但可以在 state 的 configurable 中附加运行时信息
         return None
 
-    def after_agent(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
+    def after_agent(
+        self, state: AgentState[Any], runtime: Runtime[None]
+    ) -> dict[str, Any] | None:
         """Agent 执行后可更新上下文（如新发现的偏好）"""
         return None
 
@@ -70,7 +74,7 @@ class ContextInjectionMiddleware(AgentMiddleware):
         self,
         user_context: ProcurementContext,
         thread_id: str = "",
-    ):
+    ) -> None:
         """
         更新用户上下文（新请求时调用）
 
@@ -91,7 +95,7 @@ class ContextInjectionMiddleware(AgentMiddleware):
         """获取当前上下文"""
         return self._get_context(thread_id)
 
-    def clear_context(self, thread_id: str):
+    def clear_context(self, thread_id: str) -> None:
         """清除指定线程的上下文（会话结束时调用）"""
         with self._lock:
             self._context_store.pop(thread_id, None)
@@ -108,10 +112,10 @@ class ContextInjectionMiddleware(AgentMiddleware):
                 return ctx
             return self._default_context
 
-    def _get_thread_id(self, runtime: Runtime) -> str:
+    def _get_thread_id(self, runtime: Runtime[None]) -> str:
         """从 runtime 提取 thread_id"""
         try:
-            config = runtime.config if hasattr(runtime, "config") else {}
+            config = getattr(runtime, "config", {})
             if isinstance(config, dict):
                 configurable = config.get("configurable", {})
                 return configurable.get("thread_id", "default")

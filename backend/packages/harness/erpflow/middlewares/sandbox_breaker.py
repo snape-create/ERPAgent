@@ -12,6 +12,9 @@ from langgraph.types import Command
 
 from ..log_utils import middleware_logger
 
+ToolResult = ToolMessage | Command[Any]
+ToolHandler = Callable[[ToolCallRequest], Awaitable[ToolResult]]
+
 
 class SandboxCircuitBreakerMiddleware(AgentMiddleware):
     """
@@ -54,8 +57,8 @@ class SandboxCircuitBreakerMiddleware(AgentMiddleware):
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
-    ) -> ToolMessage | Command[Any]:
+        handler: ToolHandler,
+    ) -> ToolResult:
         """拦截沙箱工具调用，实现熔断逻辑"""
         tool_name = request.tool_call.get("name", "")
 
@@ -97,14 +100,14 @@ class SandboxCircuitBreakerMiddleware(AgentMiddleware):
                 status="error",
             )
 
-    def _on_success(self):
+    def _on_success(self) -> None:
         """工具调用成功"""
         if self._state == "HALF_OPEN":
             middleware_logger.info("Circuit breaker → CLOSED (sandbox recovered)")
         self._failure_count = 0
         self._state = "CLOSED"
 
-    def _on_failure(self, tool_name: str, error: Exception):
+    def _on_failure(self, tool_name: str, error: Exception) -> None:
         """工具调用失败"""
         self._failure_count += 1
         self._last_failure_time = time.time()

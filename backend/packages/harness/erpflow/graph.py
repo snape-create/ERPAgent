@@ -14,13 +14,13 @@ server 以 ``RunnableConfig`` 调用本工厂，每个请求得到一张按用�
 """
 from __future__ import annotations
 
-from typing import Any
+from langchain_core.runnables import RunnableConfig
 
 from .agent.graph_cache import ensure_sandbox_pool_once, get_or_build
 from .schema import ProcurementContext
 
 
-def make_lead_agent(config: dict[str, Any] | None = None):
+def make_lead_agent(config: RunnableConfig | None = None):
     """LangGraph Server 的图工厂（命中缓存时不接触任何阻塞依赖）。"""
     configurable = (config or {}).get("configurable", {}) or {}
     user_context = ProcurementContext(

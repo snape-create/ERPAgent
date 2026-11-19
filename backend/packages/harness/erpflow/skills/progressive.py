@@ -9,12 +9,22 @@ import asyncio
 import base64
 import hashlib
 import json
+from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Any
 
 import yaml
-from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    ModelCallResult,
+    ModelRequest,
+    ModelResponse,
+)
 from langchain_core.messages import SystemMessage
 from langchain_core.tools import tool
+
+if TYPE_CHECKING:
+    from langchain_core.tools import BaseTool
 
 SLOT = "<!-- LIVE_SKILL_CATALOG -->"
 HEADER_LIMIT = 8192
@@ -270,10 +280,10 @@ class SkillCatalog:
 
 
 class ProgressiveSkillsMiddleware(AgentMiddleware):
-    def __init__(self, catalog):
+    def __init__(self, catalog: SkillCatalog) -> None:
         self.catalog = catalog
 
-    def refresh(self, request):
+    def refresh(self, request: ModelRequest[Any]) -> ModelRequest[Any]:
         text = self.catalog.index()
         blocks = list(request.system_message.content_blocks) if request.system_message else []
         found = False
@@ -285,14 +295,24 @@ class ProgressiveSkillsMiddleware(AgentMiddleware):
             blocks.append({"type": "text", "text": text})
         return request.override(system_message=SystemMessage(content=blocks))
 
-    def wrap_model_call(self, request, handler):
+    def wrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], ModelResponse[Any]],
+    ) -> ModelCallResult[Any]:
         return handler(self.refresh(request))
 
-    async def awrap_model_call(self, request, handler):
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelCallResult[Any]:
         return await handler(await asyncio.to_thread(self.refresh, request))
 
 
-def attach_to_subagents(subagents, catalog, tools):
+def attach_to_subagents(
+    subagents: list[dict[str, Any]], catalog: SkillCatalog, tools: list[BaseTool]
+) -> None:
     for spec in subagents:
         existing = {t.name for t in spec.get("tools", [])}
         spec.setdefault("tools", []).extend(t for t in tools if t.name not in existing)

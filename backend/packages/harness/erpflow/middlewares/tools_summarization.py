@@ -4,12 +4,12 @@
 """
 from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware, Runtime
+from langchain.agents.middleware import AgentMiddleware, AgentState, Runtime
 
 from ..log_utils import middleware_logger
 
 
-class ToolsSummarizationMiddleware(AgentMiddleware):
+class ToolsSummarizationMiddleware(AgentMiddleware[AgentState[Any], None, Any]):
     """
     对话压缩工具中间件
 
@@ -22,7 +22,7 @@ class ToolsSummarizationMiddleware(AgentMiddleware):
     本中间件作为补充，提供采购领域定制的压缩提示词。
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """
         初始化摘要监控中间件
 
@@ -35,7 +35,9 @@ class ToolsSummarizationMiddleware(AgentMiddleware):
     def name(self) -> str:
         return "ToolsSummarizationMiddleware"
 
-    def before_agent(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
+    def before_agent(
+        self, state: AgentState[Any], runtime: Runtime[None]
+    ) -> dict[str, Any] | None:
         """检查上下文长度，必要时注入压缩提示"""
         # 框架内置的 SummarizationMiddleware 已处理自动压缩
         # 本中间件仅记录状态供监控

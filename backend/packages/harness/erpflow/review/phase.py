@@ -17,12 +17,17 @@ Harness 编排模块
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, Any, NotRequired
 
 import yaml
+from deepagents.middleware import RubricState
 from langchain.agents.middleware import AgentMiddleware, Runtime
-from langchain.agents.middleware.types import AgentState, PrivateStateAttr
+from langchain.agents.middleware.todo import Todo
+from langchain.agents.middleware.types import PrivateStateAttr
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import BaseMessage
 
 from ..log_utils import agent_logger
 from ..schema import Phase, Plan, PlanStep, ReviewResult
@@ -31,26 +36,29 @@ from ..schema import Phase, Plan, PlanStep, ReviewResult
 HARNESS_CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
 
-class HarnessPhaseState(AgentState):
-    """Harness 扩展状态：在 DeepAgentState 基础上增加阶段/计划/评审字段。
+class HarnessPhaseState(RubricState):
+    """Harness 扩展状态：在 AgentState/RubricState 基础上增加阶段与计划字段。
 
     通过 HarnessPhaseMiddleware.state_schema 声明，由框架自动合并进 graph state，
     因此这些字段会出现在 checkpoint 和 values 流中（可观测、可恢复）。
     """
 
+    todos: NotRequired[list[Todo]]
+    """TodoListMiddleware 写入的任务列表。"""
+
     phase: NotRequired[str]
     """当前阶段：planning / executing / reviewing / result（见 schema.Phase）"""
 
-    plan: NotRequired[dict]
+    plan: NotRequired[dict[str, Any]]
     """结构化任务规划（schema.Plan 序列化后的 dict）"""
 
-    review_result: NotRequired[dict]
+    review_result: NotRequired[dict[str, Any]]
     """评审结果（schema.ReviewResult 序列化后的 dict）"""
 
     _harness_rubric_source: NotRequired[Annotated[str, PrivateStateAttr]]
     """记录 rubric 是否由本中间件自动注入，用于跨 checkpoint 清理旧 rubric。"""
 
-    review_decision: NotRequired[dict]
+    review_decision: NotRequired[dict[str, Any]]
     _review_start: NotRequired[Annotated[int, PrivateStateAttr]]
     _review_write_attempted: NotRequired[Annotated[bool, PrivateStateAttr]]
     _review_signals: NotRequired[Annotated[list[str], PrivateStateAttr]]
@@ -89,7 +97,7 @@ def load_harness_config(config_path: Path | None = None) -> dict[str, Any]:
         return _DEFAULT_CONFIG
 
 
-def detect_task_type(messages: list[Any], config: dict[str, Any]) -> str:
+def detect_task_type(messages: Sequence[BaseMessage], config: dict[str, Any]) -> str:
     """根据用户消息识别任务类型，用于选择对应的评审标准。
 
     规则：取最近一条 HumanMessage 的文本，按 task_types 的关键词命中判定。
@@ -145,7 +153,7 @@ _DEFINITION_PATTERN = re.compile(
 )
 
 
-def latest_human_text(messages: list[Any] | None) -> str:
+def latest_human_text(messages: Sequence[BaseMessage] | None) -> str:
     """提取当前请求最近一条人类消息的纯文本内容。"""
     for msg in reversed(messages or []):
         if getattr(msg, "type", "") != "human":
@@ -162,7 +170,9 @@ def latest_human_text(messages: list[Any] | None) -> str:
     return ""
 
 
-def should_use_grader(messages: list[Any] | None, config: dict[str, Any]) -> bool:
+def should_use_grader(
+    messages: Sequence[BaseMessage] | None, config: dict[str, Any]
+) -> bool:
     """判断本次请求是否需要调用 grader。
 
     ``review.mode`` 支持三种模式：
@@ -225,7 +235,7 @@ def build_rubric(task_type: str, config: dict[str, Any]) -> str:
     return rubric.strip()
 
 
-def _build_plan_from_todos(todos: list | None) -> dict | None:
+def _build_plan_from_todos(todos: list[Todo] | None) -> dict[str, Any] | None:
     """将 TodoListMiddleware 的 todos 转换为结构化 Plan（让 Plan/PlanStep 模型真正生效）。
 
     todos 格式（框架产出）: [{content: str, status: "pending"|"in_progress"|"completed"}]
@@ -252,7 +262,7 @@ def _build_plan_from_todos(todos: list | None) -> dict | None:
     return Plan(steps=steps, current_step=current_step).model_dump()
 
 
-class HarnessPhaseMiddleware(AgentMiddleware):
+class HarnessPhaseMiddleware(AgentMiddleware[HarnessPhaseState, None, Any]):
     """Harness 阶段状态机中间件。
 
     职责：
@@ -265,7 +275,11 @@ class HarnessPhaseMiddleware(AgentMiddleware):
 
     state_schema = HarnessPhaseState
 
-    def __init__(self, config_path: Path | None = None, router_model=None):
+    def __init__(
+        self,
+        config_path: Path | None = None,
+        router_model: BaseChatModel | None = None,
+    ) -> None:
         self._config = load_harness_config(config_path)
         from .policy import ReviewPolicy
         self._review_policy = ReviewPolicy(self._config, router_model)
@@ -275,19 +289,25 @@ class HarnessPhaseMiddleware(AgentMiddleware):
     def name(self) -> str:
         return "HarnessPhaseMiddleware"
 
-    def before_agent(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
+    def before_agent(
+        self, state: HarnessPhaseState, runtime: Runtime[None]
+    ) -> dict[str, Any] | None:
         review_update = self._review_policy.start(state)
         decision = review_update.get("review_decision", {}).get("decision", "skip")
         phase = Phase.result.value if decision == "skip" else Phase.planning.value
         return {"phase": phase, **review_update}
 
-    async def abefore_agent(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
+    async def abefore_agent(
+        self, state: HarnessPhaseState, runtime: Runtime[None]
+    ) -> dict[str, Any] | None:
         review_update = await self._review_policy.astart(state)
         decision = review_update.get("review_decision", {}).get("decision", "skip")
         phase = Phase.result.value if decision == "skip" else Phase.planning.value
         return {"phase": phase, **review_update}
 
-    def after_model(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
+    def after_model(
+        self, state: HarnessPhaseState, runtime: Runtime[None]
+    ) -> dict[str, Any] | None:
         """模型返回后：跟踪阶段 + 同步结构化 plan。
 
         - 模型产出工具调用 → 置 phase=executing（结构性写入，非正则猜测）
@@ -308,7 +328,9 @@ class HarnessPhaseMiddleware(AgentMiddleware):
 
         return updates or None
 
-    def after_agent(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
+    def after_agent(
+        self, state: HarnessPhaseState, runtime: Runtime[None]
+    ) -> dict[str, Any] | None:
         """执行后：根据评审状态置终态阶段 + 构建结构化评审结果。
 
         说明：after_agent 钩子按逆序执行，RubricMiddleware（注册在本中间件之后）

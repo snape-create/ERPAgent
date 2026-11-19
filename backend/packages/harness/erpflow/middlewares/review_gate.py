@@ -1,8 +1,11 @@
 """Execution evidence can upgrade routing; writes must not be replayed by grading."""
+from __future__ import annotations
+
 import json
+from typing import Any
 
 from deepagents import RubricMiddleware
-from langchain.agents.middleware import AgentMiddleware, hook_config
+from langchain.agents.middleware import AgentMiddleware, Runtime, hook_config
 
 from ..review import HarnessPhaseState, ReviewRoute, compose_rubric, reset_grading
 
@@ -14,7 +17,7 @@ _APPROVAL_CONTEXT = (
 )
 
 
-def _with_approval_context(state):
+def _with_approval_context(state: HarnessPhaseState) -> HarnessPhaseState:
     """审批恢复后，把可信的审批事实注入 rubric。
 
     不能写进 transcript：评审器明确把 transcript 当不可信内容，
@@ -28,7 +31,7 @@ def _with_approval_context(state):
     return {**state, "rubric": rubric + _APPROVAL_CONTEXT}
 
 
-def execution_signals(state):
+def execution_signals(state: HarnessPhaseState) -> tuple[list[str], bool]:
     messages = state.get("messages", [])[state.get("_review_start", 0):]
     signals = set()
     writes = False
@@ -63,16 +66,21 @@ def execution_signals(state):
     return sorted(signals), writes
 
 
-class ReviewExecutionGate(AgentMiddleware):
+class ReviewExecutionGate(AgentMiddleware[HarnessPhaseState, None, Any]):
     """Register AFTER RubricMiddleware so reverse after_agent order runs us first."""
     state_schema = HarnessPhaseState
 
-    def __init__(self, config):
+    def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
 
-    def after_agent(self, state, runtime):
+    def after_agent(
+        self, state: HarnessPhaseState, runtime: Runtime[None]
+    ) -> dict[str, Any] | None:
         signals, writes = execution_signals(state)
-        updates = {"_review_signals": signals, "_review_write_attempted": writes}
+        updates: dict[str, Any] = {
+            "_review_signals": signals,
+            "_review_write_attempted": writes,
+        }
         if not signals or self.config.get("review", {}).get("mode") == "never":
             return updates
         if not state.get("rubric"):
@@ -86,19 +94,23 @@ class ReviewExecutionGate(AgentMiddleware):
 
 class SafeRubricMiddleware(RubricMiddleware):
     """A separate single-pass reviewer prevents write retries without shared mutation."""
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._write_reviewer = RubricMiddleware(**{**kwargs, "max_iterations": 1})
 
     @hook_config(can_jump_to=["model"])
-    def after_agent(self, state, runtime):
+    def after_agent(
+        self, state: HarnessPhaseState, runtime: Runtime[None]
+    ) -> dict[str, Any] | None:
         state = _with_approval_context(state)
         if state.get("_review_write_attempted"):
             return self._write_reviewer.after_agent(state, runtime)
         return super().after_agent(state, runtime)
 
     @hook_config(can_jump_to=["model"])
-    async def aafter_agent(self, state, runtime):
+    async def aafter_agent(
+        self, state: HarnessPhaseState, runtime: Runtime[None]
+    ) -> dict[str, Any] | None:
         state = _with_approval_context(state)
         if state.get("_review_write_attempted"):
             return await self._write_reviewer.aafter_agent(state, runtime)

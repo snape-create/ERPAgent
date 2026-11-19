@@ -13,7 +13,7 @@ import json
 import time
 from collections.abc import Iterable, Sequence
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import namespaces as ns
 from . import scoring
@@ -28,6 +28,10 @@ from .types import (
     new_id,
     now_iso,
 )
+
+if TYPE_CHECKING:
+    from langchain_core.messages import BaseMessage
+    from langgraph.store.base import BaseStore
 
 # 只有这些"稳定偏好"会进语义记忆并做冲突追踪；
 # recent_* 属于易变信息，只留在 WARM 投影里，避免每轮都产生一条新版本。
@@ -86,7 +90,9 @@ def reset_sweep_state() -> None:
 class MemoryKeeper:
     """一位用户的记忆管家。"""
 
-    def __init__(self, store: Any, user_id: str, config: MemoryConfig | None = None):
+    def __init__(
+        self, store: BaseStore | None, user_id: str, config: MemoryConfig | None = None
+    ) -> None:
         self._store = store
         self.user_id = user_id or "default_user"
         self.config = config or DEFAULT_MEMORY_CONFIG
@@ -525,7 +531,7 @@ class MemoryKeeper:
 
     def consolidate(
         self,
-        messages: Sequence[Any],
+        messages: Sequence[BaseMessage],
         *,
         thread_id: str = "",
         now: datetime | None = None,

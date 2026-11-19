@@ -4,14 +4,20 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from langchain.agents.middleware import AgentMiddleware, Runtime
+from langchain.agents.middleware import AgentMiddleware, AgentState, Runtime
 
 from ..log_utils import middleware_logger
 
+if TYPE_CHECKING:
+    from deepagents.backends.sandbox import BaseSandbox
 
-class SandboxHealthMiddleware(AgentMiddleware):
+    from ..backends.sandbox_manager import SandboxManager
+    from ..backends.sandbox_proxy import SandboxBackendProxy
+
+
+class SandboxHealthMiddleware(AgentMiddleware[AgentState[Any], None, Any]):
     """在每次 Agent 运行前验证并在需要时重建用户沙箱。
 
     ``CompositeBackend``、文件工具和自定义工具都持有同一个
@@ -21,13 +27,13 @@ class SandboxHealthMiddleware(AgentMiddleware):
 
     def __init__(
         self,
-        sandbox_manager=None,
+        sandbox_manager: SandboxManager | None = None,
         user_id: str = "default_user",
-        sandbox_backend=None,
-        on_rebuild: Callable[[Any], None] | None = None,
+        sandbox_backend: SandboxBackendProxy | None = None,
+        on_rebuild: Callable[[BaseSandbox], None] | None = None,
         check_interval: float = 30.0,
         failure_threshold: int = 1,
-    ):
+    ) -> None:
         self._sandbox_manager = sandbox_manager
         self._user_id = user_id
         self._sandbox_backend = sandbox_backend
@@ -43,13 +49,15 @@ class SandboxHealthMiddleware(AgentMiddleware):
     def name(self) -> str:
         return "SandboxHealthMiddleware"
 
-    def before_agent(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
+    def before_agent(
+        self, state: AgentState[Any], runtime: Runtime[None]
+    ) -> dict[str, Any] | None:
         """同步入口，兼容非流式调用。"""
         self._check_and_recover()
         return None
 
     async def abefore_agent(
-        self, state: Any, runtime: Runtime
+        self, state: AgentState[Any], runtime: Runtime[None]
     ) -> dict[str, Any] | None:
         """流式路径在工作线程执行 Docker/Mongo I/O，避免阻塞 FastAPI 事件循环。"""
         await asyncio.to_thread(self._check_and_recover)

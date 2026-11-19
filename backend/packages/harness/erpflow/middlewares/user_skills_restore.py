@@ -5,15 +5,19 @@ import asyncio
 import base64
 import hashlib
 from pathlib import PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from langchain.agents.middleware import AgentMiddleware, Runtime
+from langchain.agents.middleware import AgentMiddleware, AgentState, Runtime
+from langgraph.store.base import BaseStore
 
 from ..config import skills_store_namespace
 from ..log_utils import middleware_logger
 
+if TYPE_CHECKING:
+    from ..backends.sandbox_proxy import SandboxBackendProxy
 
-class UserSkillsRestoreMiddleware(AgentMiddleware):
+
+class UserSkillsRestoreMiddleware(AgentMiddleware[AgentState[Any], None, Any]):
     """以“每文件一条 Store 记录”的形式恢复用户自定义 Skills。
 
     Store key 是受校验的相对 POSIX 路径，例如 ``csv-tools/parser.py``；恢复路径
@@ -21,7 +25,12 @@ class UserSkillsRestoreMiddleware(AgentMiddleware):
     任意提供的绝对路径。
     """
 
-    def __init__(self, store=None, user_id: str = "default_user", sandbox_backend=None):
+    def __init__(
+        self,
+        store: BaseStore | None = None,
+        user_id: str = "default_user",
+        sandbox_backend: SandboxBackendProxy | None = None,
+    ) -> None:
         self._store = store
         self._user_id = user_id
         self._sandbox_backend = sandbox_backend
@@ -35,12 +44,14 @@ class UserSkillsRestoreMiddleware(AgentMiddleware):
     def name(self) -> str:
         return "UserSkillsRestoreMiddleware"
 
-    def before_agent(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
+    def before_agent(
+        self, state: AgentState[Any], runtime: Runtime[None]
+    ) -> dict[str, Any] | None:
         self.restore_now()
         return None
 
     async def abefore_agent(
-        self, state: Any, runtime: Runtime
+        self, state: AgentState[Any], runtime: Runtime[None]
     ) -> dict[str, Any] | None:
         """Store 查询、文件写入、依赖安装全部放在线程池中。"""
         await asyncio.to_thread(self.restore_now)

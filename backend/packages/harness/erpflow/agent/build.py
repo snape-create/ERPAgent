@@ -3,7 +3,10 @@
 沙箱引导（文件上传）在 :mod:`erpflow.agent.bootstrap`；图入口在
 :mod:`erpflow.graph`（LangGraph Server 用 ``make_lead_agent`` 调用本模块）。
 """
+from __future__ import annotations
+
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, LocalShellBackend, StoreBackend
@@ -28,13 +31,17 @@ from ..memory.prompts import MAIN_SYSTEM_PROMPT, MEMORY_USAGE_PROMPT
 from ..schema import ProcurementContext
 from .bootstrap import bootstrap_sandbox
 
+if TYPE_CHECKING:
+    from langgraph.checkpoint.base import BaseCheckpointSaver
+    from langgraph.store.base import BaseStore
+
 MEMORY_DIR = Path(__file__).resolve().parents[1] / "memory"
 
 
 async def precompute_agent_context(
     user_id: str = "default_user",
     username: str = "用户",
-    store=None,
+    store: BaseStore | None = None,
 ) -> ProcurementContext:
     """
     预计算 Agent 上下文
@@ -77,8 +84,8 @@ async def precompute_agent_context(
 
 def create_main_agent(
     user_context: ProcurementContext | None = None,
-    checkpointer=None,
-    store=None,
+    checkpointer: BaseCheckpointSaver | None = None,
+    store: BaseStore | None = None,
 ):
     """
     创建主 Agent 实例

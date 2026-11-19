@@ -14,13 +14,13 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from langgraph.store.base import BaseStore, Item, Op
+from langgraph.store.base import BaseStore, Item, Op, Result
 from pymongo import MongoClient
 
 from .log_utils import web_logger
 
 
-def _to_datetime(value: Any) -> datetime:
+def _to_datetime(value: object) -> datetime:
     """把 ISO 字符串还原成 datetime；解析不了就用当前时间兜底。"""
     if isinstance(value, datetime):
         return value
@@ -36,8 +36,8 @@ def _make_item(
     namespace: tuple[str, ...],
     key: str,
     value: Any,
-    created_at: Any = None,
-    updated_at: Any = None,
+    created_at: datetime | str | None = None,
+    updated_at: datetime | str | None = None,
 ) -> Item:
     """构造 Item，兼容不同 langgraph 版本的字段要求。
 
@@ -229,7 +229,7 @@ class MongoDBStore(BaseStore):
     # 批量接口
     # ============================================================
 
-    def batch(self, ops: Sequence[Op]) -> list[Any]:
+    def batch(self, ops: Sequence[Op]) -> list[Result]:
         """批量操作"""
         results = []
         for op in ops:
@@ -246,7 +246,7 @@ class MongoDBStore(BaseStore):
                 results.append(None)
         return results
 
-    async def abatch(self, ops: Sequence[Op]) -> list[Any]:
+    async def abatch(self, ops: Sequence[Op]) -> list[Result]:
         return self.batch(ops)
 
     # ============================================================
