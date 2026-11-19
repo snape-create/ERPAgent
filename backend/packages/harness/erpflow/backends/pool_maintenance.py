@@ -5,21 +5,32 @@
 它手里根本没有沙箱。
 """
 import threading
+import time
 
-from ..config import SANDBOX_MAINTENANCE_INTERVAL_SECONDS
+from ..config import (
+    SANDBOX_MAINTENANCE_INTERVAL_SECONDS,
+    SANDBOX_USER_DATA_CLEANUP_INTERVAL_SECONDS,
+)
 from ..log_utils import sandbox_logger
 from .sandbox_manager import sandbox_manager
-from .sandbox_reaper import cleanup_stale_warm
+from .sandbox_reaper import cleanup_stale_user_containers, cleanup_stale_warm
+from .user_data_cleanup import cleanup_expired_user_data
 
 _started = False
 _lock = threading.Lock()
 
 
 def _loop(stop_event: threading.Event) -> None:
+    last_cleanup = 0.0
     while not stop_event.is_set():
         try:
             sandbox_manager.cleanup_idle_sandboxes()
             sandbox_manager.ensure_warm_pool()
+
+            now = time.monotonic()
+            if now - last_cleanup >= SANDBOX_USER_DATA_CLEANUP_INTERVAL_SECONDS:
+                cleanup_expired_user_data()
+                last_cleanup = now
         except Exception as exc:
             sandbox_logger.warning(f"Sandbox maintenance iteration failed: {exc}")
         if stop_event.wait(SANDBOX_MAINTENANCE_INTERVAL_SECONDS):
@@ -36,8 +47,9 @@ def start_maintenance() -> threading.Event:
         _started = True
 
     try:
-        # 上次进程可能被强杀；先扫掉未登记的 warm，再补池
+        # 上次进程可能被强杀；先扫掉未登记的 warm/用户容器，再补池
         cleanup_stale_warm()
+        cleanup_stale_user_containers()
         sandbox_manager.ensure_warm_pool()
     except Exception as exc:
         sandbox_logger.warning(f"Initial warm pool fill failed: {exc}")

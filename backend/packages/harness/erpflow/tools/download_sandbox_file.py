@@ -20,8 +20,9 @@ from urllib.parse import quote
 
 from langchain_core.tools import tool
 
-from ..config import DOWNLOAD_DIR
+from ..config import DOWNLOAD_DIR, SANDBOX_ALLOW_LOCAL_FALLBACK, SANDBOX_WORK_DIR
 from ..log_utils import agent_logger
+from .path_safety import UnsafePathError, resolve_under
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"}
 
@@ -66,44 +67,11 @@ def _build_result_message(
     return "\n".join(lines)
 
 
-def _path_has_content(container, path: str) -> bool:
-    """判断路径是否"存在且有内容"。
-
-    仅用 ``test -e`` 不足以在多个沙箱间消歧：``/workspace/output`` 这类目录
-    在所有沙箱里都由 bootstrap 创建，目录本身存在但可能是空的。
-    因此目录还要额外确认非空。
-
-    注意 exec_run 默认 ``shell=False``，涉及管道/重定向必须显式走 ``sh -c``。
-    """
-    import shlex
-
-    if container.exec_run(["test", "-e", path]).exit_code != 0:
-        return False
-
-    if container.exec_run(["test", "-d", path]).exit_code == 0:
-        probe = container.exec_run(
-            ["sh", "-c", f"ls -A {shlex.quote(path)} 2>/dev/null | head -n 1"]
-        )
-        return bool((probe.output or b"").strip())
-
-    return True
-
-
 def _get_docker_container(remote_path: str = ""):
-    """定位 Docker 沙箱容器。
+    """定位当前 run 绑定的 Docker 沙箱容器。
 
-    预热池会同时存在多个 ``erp-sandbox-*`` 容器：一个被当前会话 claim，
-    其余处于 WARM 空闲待命。早期实现直接取 ``containers.list()`` 的第一个，
-    可能拿到空容器，导致明明生成成功的文件被报告成"文件不存在"。
-
-    这里按三级优先级定位：
-    1. 当前请求上下文绑定的沙箱（``sandbox_holder``）—— 最准确，不受容器数量影响
-    2. 固定命名容器（单容器部署场景）
-    3. 在候选容器中按 ``remote_path`` 是否存在消歧
-    4. 兜底取第一个运行中的容器
-
-    Args:
-        remote_path: 待访问的沙箱内路径，用于第 3 级消歧
+    只允许访问 ``sandbox_holder`` 中当前请求绑定的容器；不再扫描所有
+    ``erp-sandbox-*`` 容器做兜底——那会把 A 用户的文件泄露给 B 用户。
     """
     try:
         import docker
@@ -113,50 +81,20 @@ def _get_docker_container(remote_path: str = ""):
         return None, None
 
     try:
-        # 1) 当前请求绑定的沙箱
+        from ..backends.sandbox_holder import get_sandbox
+
+        bound = get_sandbox()
+        bound_name = getattr(bound, "container_name", None) if bound else None
+        if not bound_name:
+            client.close()
+            return None, None
+
         try:
-            from ..backends.sandbox_holder import get_sandbox
-
-            bound = get_sandbox()
-            bound_name = getattr(bound, "container_name", None) if bound else None
-            if bound_name:
-                try:
-                    container = client.containers.get(bound_name)
-                    if container.status == "running":
-                        return container, client
-                except Exception:
-                    agent_logger.debug(
-                        f"Bound sandbox '{bound_name}' unavailable, falling back"
-                    )
+            container = client.containers.get(bound_name)
+            if container.status == "running":
+                return container, client
         except Exception:
-            pass
-
-        # 2) 固定命名容器
-        for name in ("erp-sandbox", "erp-sandbox-default_user"):
-            try:
-                container = client.containers.get(name)
-                if container.status == "running":
-                    return container, client
-            except Exception:
-                continue
-
-        candidates = [
-            c
-            for c in client.containers.list()
-            if c.name.startswith("erp-sandbox-") and c.status == "running"
-        ]
-
-        # 3) 按目标路径存在性消歧
-        if remote_path and len(candidates) > 1:
-            for container in candidates:
-                try:
-                    if _path_has_content(container, remote_path):
-                        return container, client
-                except Exception:
-                    continue
-
-        if candidates:
-            return candidates[0], client
+            agent_logger.warning(f"Bound sandbox '{bound_name}' unavailable")
 
         client.close()
         return None, None
@@ -167,6 +105,25 @@ def _get_docker_container(remote_path: str = ""):
         except Exception:
             pass
         return None, None
+
+
+def _resolve_local_source(remote_path: str) -> Path:
+    """把本地回退路径限制在 ``DOWNLOAD_DIR`` 内。
+
+    相对路径按 ``DOWNLOAD_DIR`` 解析；绝对路径同样必须落在
+    ``DOWNLOAD_DIR`` 内（``resolve()`` 展开符号链接后再比较），否则拒绝。
+    这样即使本地回退被显式打开，也不会读取宿主机任意文件。
+    """
+    base = DOWNLOAD_DIR.resolve()
+    if not remote_path or "\x00" in remote_path:
+        raise UnsafePathError("路径不能为空或包含 NUL 字符")
+    raw = Path(remote_path)
+    target = (raw if raw.is_absolute() else base / raw).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError as exc:
+        raise UnsafePathError(f"路径不在下载目录内: {remote_path}") from exc
+    return target
 
 
 @tool
@@ -180,7 +137,7 @@ def download_sandbox_file(remote_path: str, filename: str = "") -> str:
     - 返回 HTTP 下载链接
 
     Args:
-        remote_path: 沙箱内的文件路径（如 /workspace/report.md, /tmp/chart.png）
+        remote_path: 沙箱内的文件路径（如 /mnt/user-data/outputs/report.md）
         filename: 下载后的文件名（默认使用原文件名）
 
     Returns:
@@ -190,6 +147,13 @@ def download_sandbox_file(remote_path: str, filename: str = "") -> str:
 
     if not filename:
         filename = Path(remote_path).name
+
+    # 文件名来自模型/请求，必须先锁定在 DOWNLOAD_DIR 内，后续写入复用该路径。
+    try:
+        target = resolve_under(DOWNLOAD_DIR, filename)
+    except UnsafePathError as exc:
+        return f"文件名非法: {exc}"
+    filename = target.name
 
     # === 方式1：从 Docker 沙箱下载 ===
     container, docker_client = _get_docker_container(remote_path)
@@ -226,8 +190,7 @@ def download_sandbox_file(remote_path: str, filename: str = "") -> str:
             # 解码 base64
             content = base64.b64decode(stdout.strip())
 
-            # 写入下载目录
-            target = DOWNLOAD_DIR / filename
+            # 写入下载目录（target 已在 DOWNLOAD_DIR 内解析并校验）
             target.write_bytes(content)
 
             docker_client.close()
@@ -252,42 +215,55 @@ def download_sandbox_file(remote_path: str, filename: str = "") -> str:
             agent_logger.error(f"Sandbox download error: {e}")
             # 回退到本地文件检查
 
-    # === 方式2：回退到本地文件（开发模式 / 沙箱不可用）===
-    source = Path(remote_path)
-    if source.exists():
-        if source.is_dir():
-            return f"路径是目录而非文件: {remote_path}"
+    # === 方式2：回退到本地文件（仅本地开发显式开启）===
+    # 默认关闭：沙箱不可用时不得把宿主机文件系统暴露给模型。
+    if SANDBOX_ALLOW_LOCAL_FALLBACK:
+        try:
+            source = _resolve_local_source(remote_path)
+        except UnsafePathError as exc:
+            return f"路径非法: {exc}"
 
-        target = DOWNLOAD_DIR / filename
-        import shutil
-        shutil.copy2(source, target)
+        if source.exists():
+            if source.is_dir():
+                return f"路径是目录而非文件: {remote_path}"
 
-        download_url = f"http://localhost:8000/api/download/{quote(filename)}"
-        agent_logger.info(f"File downloaded (local fallback): {source} -> {target}")
-        return _build_result_message(
-            filename,
-            download_url,
-            source.stat().st_size / 1024,
-            sandbox=False,
-            remote_path=remote_path,
-            local_path=target,
+            import shutil
+            shutil.copy2(source, target)
+
+            download_url = f"http://localhost:8000/api/download/{quote(filename)}"
+            agent_logger.info(f"File downloaded (local fallback): {source} -> {target}")
+            return _build_result_message(
+                filename,
+                download_url,
+                source.stat().st_size / 1024,
+                sandbox=False,
+                remote_path=remote_path,
+                local_path=target,
+            )
+
+        return (
+            f"文件下载失败:\n"
+            f"- 沙箱路径: {remote_path}\n"
+            f"- 沙箱状态: {'运行中' if container else '不可用'}\n"
+            f"- 本地文件: 不存在\n"
+            f"请确认文件已在沙箱中生成。"
         )
 
     return (
         f"文件下载失败:\n"
         f"- 沙箱路径: {remote_path}\n"
         f"- 沙箱状态: {'运行中' if container else '不可用'}\n"
-        f"- 本地文件: {'不存在' if not source.exists() else '存在'}\n"
+        f"- 本地回退: 未启用（SANDBOX_ALLOW_LOCAL_FALLBACK=false）\n"
         f"请确认文件已在沙箱中生成。"
     )
 
 
 @tool
-def list_sandbox_files(path: str = "/workspace") -> str:
+def list_sandbox_files(path: str = SANDBOX_WORK_DIR) -> str:
     """列出沙箱内指定目录的文件。
 
     Args:
-        path: 沙箱内的目录路径（默认 /workspace）
+        path: 沙箱内的目录路径（默认 /mnt/user-data/workspace）
 
     Returns:
         文件列表

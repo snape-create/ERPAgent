@@ -1,0 +1,15 @@
+# 沙箱镜像运行时依赖（与 backend/harness 的 pyproject 解耦）。
+# 构建：uv pip install --system --no-cache -r requirements.sandbox.txt
+#
+# 这里显式列出镜像需要的依赖；版本下限与 harness 保持一致。
+# 需要完全可复现时，用锁文件：
+#   uv pip compile requirements.sandbox.txt -o requirements.sandbox.lock
+# 然后让 Dockerfile 安装 .lock。
+matplotlib>=3.9
+numpy>=1.26
+pandas>=2.2
+openpyxl>=3.1
+seaborn>=0.13
+jinja2>=3.1
+markdown>=3.5
+beautifulsoup4>=4.12

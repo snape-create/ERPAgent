@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -43,6 +44,8 @@ class SandboxHealthMiddleware(AgentMiddleware[AgentState[Any], None, Any]):
         self._last_check: float = 0.0
         self._healthy = True
         self._consecutive_failures = 0
+        self._lease_held = False
+        self._lease_lock = threading.Lock()
         self.tools = []
 
     @property
@@ -54,6 +57,7 @@ class SandboxHealthMiddleware(AgentMiddleware[AgentState[Any], None, Any]):
     ) -> dict[str, Any] | None:
         """同步入口，兼容非流式调用。"""
         self._check_and_recover()
+        self._acquire_lease()
         return None
 
     async def abefore_agent(
@@ -61,7 +65,42 @@ class SandboxHealthMiddleware(AgentMiddleware[AgentState[Any], None, Any]):
     ) -> dict[str, Any] | None:
         """流式路径在工作线程执行 Docker/Mongo I/O，避免阻塞 FastAPI 事件循环。"""
         await asyncio.to_thread(self._check_and_recover)
+        self._acquire_lease()
         return None
+
+    def after_agent(
+        self, state: AgentState[Any], runtime: Runtime[None]
+    ) -> dict[str, Any] | None:
+        self._release_lease()
+        return None
+
+    async def aafter_agent(
+        self, state: AgentState[Any], runtime: Runtime[None]
+    ) -> dict[str, Any] | None:
+        self._release_lease()
+        return None
+
+    def _acquire_lease(self) -> None:
+        """标记本 run 正在进行，避免 idle 清理误删长任务容器。"""
+        if self._sandbox_manager is None:
+            return
+        with self._lease_lock:
+            if self._lease_held:
+                return
+            acquire = getattr(self._sandbox_manager, "acquire_lease", None)
+            if callable(acquire) and acquire(self._user_id):
+                self._lease_held = True
+
+    def _release_lease(self) -> None:
+        if self._sandbox_manager is None:
+            return
+        with self._lease_lock:
+            if not self._lease_held:
+                return
+            release = getattr(self._sandbox_manager, "release_lease", None)
+            if callable(release):
+                release(self._user_id)
+            self._lease_held = False
 
     def _check_and_recover(self) -> None:
         # LocalShell fallback 没有 Manager，保持原有开发模式语义。

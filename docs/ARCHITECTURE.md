@@ -80,11 +80,28 @@ ERP 后端 (:8081)
 ## 6. 沙箱
 
 - 7 层防护：只读根文件系统、`--tmpfs /tmp`、内存/CPU 上限、网络隔离、`cap-drop ALL`、seccomp、PID 限制
+- 安全容器创建失败默认 **fail closed**；只有 `allow_insecure_fallback=true` 才允许开发回退
+- 网络模式只允许 `none` / `bridge`，默认 `none`
+- 用户数据目录（每个用户一个容器）：
+  - 宿主机：`backend/.sandbox/users/{user_id}/user-data/{uploads,outputs}`
+  - 容器：`/mnt/user-data/uploads`、`/mnt/user-data/outputs`（rw bind mount）
+  - `/mnt/user-data/workspace` 是 tmpfs，不持久化（Q3=A）
+  - `user-data_mounts=true` 时 warm pool 自动停用（认领后无法补挂载）
+- Python 依赖安装在 `/opt/pydeps`（exec tmpfs），不能用 noexec 的 workspace
 - 五态生命周期：预热池 → 认领 → MongoDB 缓存 → 新建 → 销毁
 - 镜像由 `docker/Dockerfile.sandbox` 构建
+- 工具调用通过 `RuntimeBindingMiddleware` 绑定当前 run 的 user/store/sandbox，并在 `finally` 复位
+- Agent run 通过 `SandboxHealthMiddleware` 持有 lease，空闲回收不会误删运行中的容器
+- 启动期同时清理未登记的 warm 容器与超过安全年龄的孤儿用户容器
+- `sandbox_cache` 对 `user_id` 建唯一索引；健康检查会实际 exec `true`
+- `install_skill` 只写当前用户沙箱 + 用户级 Store，不再写宿主全局 skills
+- `web_fetch` / `install_skill` 默认拒绝私网/loopback/链路本地地址，并限制下载与解压大小
+- 下载文件名统一经 `tools/path_safety.py` 做单文件名 + containment 校验；宿主机本地回退默认关闭
+- 上传接口写入 `user-data/uploads`；`max_upload_mb` 限制单文件大小
+- `user_data_cleanup.py` 按 `uploads_ttl_days` / `outputs_ttl_days` 清理过期文件；有运行中容器的用户跳过
 - `backends/` 内按关注点分工：
   - `sandbox_manager.py` 状态机与编排（池、认领、重建、租约、健康、空闲回收）
-  - `sandbox_entry.py` 条目元数据 + 容器创建（预热/用户容器共用一套初始化）
+  - `sandbox_entry.py` 条目元数据 + 容器创建 + user-data 挂载路径
   - `sandbox_cache.py` `sandbox_cache` 集合读写（user→container 映射）
   - `sandbox_reaper.py` 启动期孤儿 warm 容器清理（只读命名前缀 + 缓存）
 
@@ -99,6 +116,9 @@ ERP 后端 (:8081)
 | GET | `/api/history/{thread_id}/messages` | 会话消息 |
 | DELETE | `/api/history/{thread_id}` | 删除会话（硬删除） |
 | GET | `/api/download/{filename}` | 下载生成的文档/图表 |
+| POST | `/api/uploads` | 上传文件到当前用户的 `user-data/uploads`（form：`user_id` + `files`） |
+| GET | `/api/uploads?user_id=` | 列出当前用户的上传文件 |
+| DELETE | `/api/uploads/{filename}?user_id=` | 删除上传文件 |
 | GET | `/api/mcp/servers` | MCP server 列表及启用状态 |
 | POST | `/api/mcp/servers/{name}/toggle` | 启用/禁用某个 MCP server（body：`{"enabled": bool}`，下一条对话生效） |
 | GET | `/health` | 健康检查 |

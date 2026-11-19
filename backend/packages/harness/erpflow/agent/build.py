@@ -119,12 +119,16 @@ def create_main_agent(
     # Manager 负责用户级领取/恢复/重建；Proxy 保持 Agent 已持有的后端引用稳定。
     sandbox_manager_instance = None
     managed_sandbox = False
+    claimed_sandbox = False
+    manager_for_cleanup = None
     try:
         from ..backends.sandbox_holder import set_sandbox
         from ..backends.sandbox_manager import sandbox_manager
         from ..backends.sandbox_proxy import SandboxBackendProxy
 
+        manager_for_cleanup = sandbox_manager
         raw_sandbox = sandbox_manager.get_sandbox(user_context.user_id)
+        claimed_sandbox = True
         sandbox_backend = SandboxBackendProxy(raw_sandbox)
         bootstrap_sandbox(sandbox_backend)
         sandbox_manager_instance = sandbox_manager
@@ -136,6 +140,18 @@ def create_main_agent(
             f"{sandbox_backend.container_name}"
         )
     except Exception as e:
+        # bootstrap / 注册失败时，刚领取的容器不能留在缓存里变孤儿。
+        if claimed_sandbox and manager_for_cleanup is not None:
+            try:
+                manager_for_cleanup.destroy_user_sandbox(user_context.user_id)
+                agent_logger.info(
+                    f"Destroyed unusable claimed sandbox for {user_context.user_id}"
+                )
+            except Exception as cleanup_error:
+                agent_logger.warning(
+                    f"Failed to clean up claimed sandbox for "
+                    f"{user_context.user_id}: {cleanup_error}"
+                )
         agent_logger.warning(
             f"Managed Docker sandbox unavailable ({e}), falling back to LocalShell"
         )
@@ -211,6 +227,7 @@ def create_main_agent(
     from ..middlewares.memory_update import MemoryUpdateMiddleware
     from ..middlewares.order_intake import OrderIntakeMiddleware
     from ..middlewares.review_gate import ReviewExecutionGate, SafeRubricMiddleware
+    from ..middlewares.runtime_binding import RuntimeBindingMiddleware
     from ..middlewares.sandbox_breaker import SandboxCircuitBreakerMiddleware
     from ..middlewares.sandbox_health import SandboxHealthMiddleware
     from ..middlewares.skills_sync import SkillsSyncMiddleware
@@ -258,6 +275,12 @@ def create_main_agent(
 
     middlewares = [
         # --- 自定义中间件（执行顺序 1→7）---
+        # 必须最外层：先绑定本 run 的 user/store/sandbox，内层工具和子 Agent 才能取到。
+        RuntimeBindingMiddleware(
+            user_id=user_context.user_id,
+            store=store,
+            sandbox=sandbox_backend if managed_sandbox else None,
+        ),
         SandboxHealthMiddleware(
             sandbox_manager=sandbox_manager_instance,
             user_id=user_context.user_id,

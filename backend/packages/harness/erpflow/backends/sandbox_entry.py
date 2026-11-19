@@ -6,16 +6,29 @@
 import uuid
 from datetime import datetime
 
+from ..config import (
+    SANDBOX_OUTPUTS_DIR,
+    SANDBOX_PYTHON_PACKAGES_DIR,
+    SANDBOX_SKILLS_DIR,
+    SANDBOX_UPLOADS_DIR,
+    SANDBOX_USER_DATA_MOUNTS,
+    SANDBOX_WORK_DIR,
+)
 from .custom_opensandbox import CustomOpenSandbox
 from .sandbox_setup import SandboxConfig, create_secure_sandbox
+from .user_data import user_data_mounts
 
-# 容器内统一预建的目录（图表/数据/产物/技能）
+# 容器内统一预建的目录（工作区/产物/技能/依赖）
 WORKSPACE_DIRS = (
+    SANDBOX_WORK_DIR,
+    f"{SANDBOX_WORK_DIR}/data",
+    f"{SANDBOX_WORK_DIR}/analysis",
+    SANDBOX_OUTPUTS_DIR,
+    SANDBOX_UPLOADS_DIR,
+    SANDBOX_PYTHON_PACKAGES_DIR,
+    SANDBOX_SKILLS_DIR,
+    # 兼容旧路径，迁移完成后可删。
     "/workspace",
-    "/workspace/data",
-    "/workspace/analysis",
-    "/workspace/output",
-    "/skills",
 )
 
 WARM_NAME_PREFIX = "erp-sandbox-warm-"
@@ -42,13 +55,15 @@ def user_container_name(user_id: str) -> str:
     return f"{USER_NAME_PREFIX}-{safe_user_id}-{uuid.uuid4().hex[:12]}"
 
 
-def create_sandbox_container(name: str) -> CustomOpenSandbox:
+def create_sandbox_container(name: str, user_id: str = "") -> CustomOpenSandbox:
     """创建一个带安全防护的沙箱容器，并预建标准目录。
 
-    预热阶段 runtimes=[]：镜像已带 Python，图表/技能依赖按需装到
-    /workspace/python-packages，避免预热时做耗时网络安装。
+    用户容器会挂载 ``user-data/{uploads,outputs}``；预热容器没有用户，
+    不挂载任何用户数据。启用 user-data 挂载时 warm pool 会被停用。
     """
-    sandbox = create_secure_sandbox(SandboxConfig(name=name, runtimes=[]))
+    volumes = user_data_mounts(user_id) if (SANDBOX_USER_DATA_MOUNTS and user_id) else {}
+    # runtimes 使用配置默认值（[sandbox.container].runtimes），不再静默忽略。
+    sandbox = create_secure_sandbox(SandboxConfig(name=name, volumes=volumes))
     sandbox.execute("mkdir -p " + " ".join(WORKSPACE_DIRS))
     return sandbox
 

@@ -3,7 +3,7 @@
 支持生成 Markdown、HTML、CSV、JSON、纯文本报告。
 
 核心设计（Harness 思想）：
-- 所有文件必须先生成在 Docker 沙箱内（/workspace/output/）
+- 所有文件必须先生成在 Docker 沙箱内（/mnt/user-data/outputs/）
 - 用户需要下载时，通过 download_sandbox_file 工具从沙箱提取到本地
 - 沙箱不可用时回退到本地生成
 
@@ -22,11 +22,12 @@ from urllib.parse import quote
 from langchain_core.tools import tool
 
 from ..backends.sandbox_holder import get_sandbox
-from ..config import DOWNLOAD_DIR
+from ..config import DOWNLOAD_DIR, SANDBOX_OUTPUTS_DIR
 from ..log_utils import agent_logger
+from .path_safety import UnsafePathError, resolve_under
 
 # 沙箱内输出目录
-SANDBOX_OUTPUT_DIR = "/workspace/output"
+SANDBOX_OUTPUT_DIR = SANDBOX_OUTPUTS_DIR
 # 本地回退目录：与 gateway 的 /api/download 必须一致
 LOCAL_DOWNLOAD_DIR = DOWNLOAD_DIR
 
@@ -61,6 +62,12 @@ def generate_document(
         safe_title = "".join(c if c.isalnum() or c in "-_" else "_" for c in title[:30])
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{safe_title}_{timestamp}"
+
+    # 文件名必须锁定在下载目录内，后续沙箱路径与本地路径都用这个安全名字。
+    try:
+        filename = resolve_under(LOCAL_DOWNLOAD_DIR, filename).name
+    except UnsafePathError as exc:
+        return f"文件名非法: {exc}"
 
     format = format.lower().strip()
 
@@ -210,12 +217,19 @@ def _generate_text(title: str, content: str, filename: str) -> str:
 
 def _write_to_sandbox_or_local(filename: str, content: str, title: str, format_name: str) -> str:
     """核心写入逻辑：优先写入沙箱，回退到本地"""
+    # 再校验一次带扩展名的最终文件名，并用解析后的名字拼两条路径。
+    try:
+        file_path = resolve_under(LOCAL_DOWNLOAD_DIR, filename)
+    except UnsafePathError as exc:
+        return f"文件名非法: {exc}"
+    safe_name = file_path.name
+
     sandbox = get_sandbox()
 
     if sandbox is not None:
         try:
-            # ✅ 写入沙箱 /workspace/output/ 目录
-            sandbox_path = f"{SANDBOX_OUTPUT_DIR}/{filename}"
+            # ✅ 写入沙箱 /mnt/user-data/outputs/ 目录
+            sandbox_path = f"{SANDBOX_OUTPUT_DIR}/{safe_name}"
             sandbox.execute(f"mkdir -p {SANDBOX_OUTPUT_DIR}")
             sandbox.write_file(sandbox_path, content)
             file_size = len(content.encode("utf-8"))
@@ -236,7 +250,6 @@ def _write_to_sandbox_or_local(filename: str, content: str, title: str, format_n
 
     # 回退：写入本地
     LOCAL_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    file_path = LOCAL_DOWNLOAD_DIR / filename
     file_path.write_text(content, encoding="utf-8")
     file_size = file_path.stat().st_size
     download_url = f"http://localhost:8000/api/download/{quote(file_path.name)}"

@@ -6,6 +6,8 @@
 每次操作独立开关 client：这些调用都在锁外、低频（认领/恢复/回收），
 共享长连接反而要在进程关停时处理更多生命周期问题。
 """
+import threading
+
 from ..config import MONGODB_DB_NAME, MONGODB_SELECTION_TIMEOUT_MS, MONGODB_URI
 from ..log_utils import sandbox_logger
 
@@ -27,6 +29,22 @@ class SandboxCache:
         self._uri = uri or MONGODB_URI
         self._db_name = db_name or MONGODB_DB_NAME
         self._timeout_ms = timeout_ms
+        self._index_ready = False
+        self._index_lock = threading.Lock()
+
+    def _ensure_unique_index(self, collection) -> None:
+        """保证 user_id 唯一，避免并发 upsert 产生重复映射。"""
+        if self._index_ready:
+            return
+        with self._index_lock:
+            if self._index_ready:
+                return
+            try:
+                collection.create_index("user_id", unique=True)
+            except Exception as exc:
+                # 旧数据已有重复时建索引会失败；保留 upsert 行为并记录。
+                sandbox_logger.warning(f"Failed to create sandbox_cache unique index: {exc}")
+            self._index_ready = True
 
     def _connect(self):
         """返回 (client, collection)；调用方负责 close。"""
@@ -43,6 +61,7 @@ class SandboxCache:
         try:
             client, collection = self._connect()
             try:
+                self._ensure_unique_index(collection)
                 collection.update_one({"user_id": user_id}, {"$set": payload}, upsert=True)
             finally:
                 client.close()

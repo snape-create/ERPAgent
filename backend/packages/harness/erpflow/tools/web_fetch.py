@@ -12,18 +12,134 @@ Skill 标准结构：
 """
 import base64
 import io
+import ipaddress
 import re
+import socket
 import tarfile
 import zipfile
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
+from urllib.parse import urlparse
 
 import httpx
 import yaml
 from langchain_core.tools import tool
 
-from ..config import SKILLS_DIR, skills_store_namespace
+from ..config import (
+    SANDBOX_ALLOW_PRIVATE_WEB,
+    SANDBOX_MAX_ARCHIVE_FILES,
+    SANDBOX_MAX_ARCHIVE_MB,
+    SANDBOX_MAX_EXTRACTED_MB,
+    SANDBOX_MAX_FETCH_MB,
+    SANDBOX_PYTHON_PACKAGES_DIR,
+    skills_store_namespace,
+)
 from ..log_utils import agent_logger
 from ..runtime_context import get_current_store, get_current_user_id
+
+# 下载/解压上限（统一换算成字节，便于流式累加比较）
+_MAX_FETCH_BYTES = SANDBOX_MAX_FETCH_MB * 1024 * 1024
+_MAX_ARCHIVE_BYTES = SANDBOX_MAX_ARCHIVE_MB * 1024 * 1024
+_MAX_EXTRACTED_BYTES = SANDBOX_MAX_EXTRACTED_MB * 1024 * 1024
+_MAX_ARCHIVE_FILES = SANDBOX_MAX_ARCHIVE_FILES
+
+_FETCH_HEADERS = {"User-Agent": "ERP-Agent/1.0 (Skill Downloader)"}
+
+
+class _HttpStatusError(Exception):
+    """非 200 响应：保留调用方原有的错误文案。"""
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        super().__init__(f"HTTP {status_code}")
+
+
+def _ip_is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """内网 / 本机 / 链路本地 / 组播 / 保留 / 未指定地址一律视为不可访问。"""
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _validate_url(url: str) -> str:
+    """校验 URL 协议与目标地址，阻止 SSRF。
+
+    仅允许 http/https；域名解析出的所有 IP 都必须是公网地址。
+    显式开启 SANDBOX_ALLOW_PRIVATE_WEB 时放行内网/本机地址（开发调试用）。
+    DNS rebinding 在本层无法完全防御，属于可接受的残余风险。
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"URL 协议不支持，仅允许 http/https: {url}")
+    host = parsed.hostname
+    if not host:
+        raise ValueError(f"URL 缺少有效主机名: {url}")
+
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"URL 端口无效: {url}") from exc
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"无法解析主机名: {host}") from exc
+    if not infos:
+        raise ValueError(f"无法解析主机名: {host}")
+
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if not _ip_is_blocked(ip):
+            continue
+        if SANDBOX_ALLOW_PRIVATE_WEB and (ip.is_private or ip.is_loopback):
+            continue
+        raise ValueError(f"安全限制：禁止访问内网或保留地址 {ip}（主机 {host}）")
+
+    return url
+
+
+def _http_get_limited(
+    url: str, max_bytes: int, timeout: float = 30.0
+) -> tuple[bytes, str, str]:
+    """带大小上限的 HTTP GET，返回 (内容字节, content-type, 最终 URL)。"""
+    _validate_url(url)
+
+    with (
+        httpx.Client(
+            follow_redirects=True,
+            max_redirects=5,
+            timeout=timeout,
+            headers=_FETCH_HEADERS,
+        ) as client,
+        client.stream("GET", url) as response,
+    ):
+        if response.status_code != 200:
+            raise _HttpStatusError(response.status_code)
+
+        final_url = str(response.url)
+        # 重定向目标同样要做 SSRF 校验
+        _validate_url(final_url)
+        content_type = response.headers.get("content-type", "")
+
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in response.iter_bytes():
+            total += len(chunk)
+            if total > max_bytes:
+                limit_mb = max_bytes // (1024 * 1024)
+                raise ValueError(f"下载内容超过大小限制（最大 {limit_mb} MB）: {final_url}")
+            chunks.append(chunk)
+
+    # 请求结束后再次校验最终 URL，防止重定向到内网
+    _validate_url(final_url)
+
+    return b"".join(chunks), content_type, final_url
 
 
 def _strip_html(html: str) -> str:
@@ -54,30 +170,26 @@ def web_fetch(url: str, max_chars: int = 8000) -> str:
         return "错误: URL 必须以 http:// 或 https:// 开头"
 
     try:
-        response = httpx.get(
-            url,
-            follow_redirects=True,
-            timeout=20,
-            headers={"User-Agent": "ERP-Agent/1.0 (Skill Downloader)"},
-        )
+        content, content_type, _ = _http_get_limited(url, _MAX_FETCH_BYTES, timeout=20)
 
-        if response.status_code != 200:
-            return f"请求失败: HTTP {response.status_code}"
-
-        content_type = response.headers.get("content-type", "")
-        text = response.text
+        text = content.decode("utf-8", errors="replace")
 
         # HTML → 纯文本
         if "text/html" in content_type:
             text = _strip_html(text)
 
         # 截断
-        if len(text) > max_chars:
-            text = text[:max_chars] + f"\n\n... [内容已截断，共 {len(response.text)} 字符]"
+        total_chars = len(text)
+        if total_chars > max_chars:
+            text = text[:max_chars] + f"\n\n... [内容已截断，共 {total_chars} 字符]"
 
         agent_logger.info(f"web_fetch: {url} ({len(text)} chars)")
         return text
 
+    except _HttpStatusError as e:
+        return f"请求失败: HTTP {e.status_code}"
+    except ValueError as e:
+        return str(e)
     except httpx.TimeoutException:
         return f"请求超时: {url}"
     except Exception as e:
@@ -91,13 +203,51 @@ def web_fetch(url: str, max_chars: int = 8000) -> str:
 #         ↓ 失败
 #       清理沙箱临时文件 + 返回错误
 # ============================================================
+def _validate_archive_member_name(name: str) -> None:
+    """拒绝绝对路径、反斜杠、NUL 与 '..' 路径段的压缩包成员。"""
+    if not name or "\x00" in name or "\\" in name:
+        raise ValueError(f"压缩包成员名称非法: {name!r}")
+    if PurePosixPath(name).is_absolute() or re.match(r"^[A-Za-z]:", name):
+        raise ValueError(f"压缩包成员使用了绝对路径: {name}")
+    if ".." in PurePosixPath(name).parts:
+        raise ValueError(f"压缩包成员包含路径上溯: {name}")
+
+
+def _validate_relative_member_path(rel_path: str, original: str) -> None:
+    """校验剥离顶层目录后的相对路径仍然安全。"""
+    if "\x00" in rel_path or "\\" in rel_path:
+        raise ValueError(f"压缩包成员名称非法: {original!r}")
+    path = PurePosixPath(rel_path)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"压缩包成员路径不安全: {original}")
+
+
+def _check_member_size(size: int, name: str) -> None:
+    if size > _MAX_EXTRACTED_BYTES:
+        limit_mb = _MAX_EXTRACTED_BYTES // (1024 * 1024)
+        raise ValueError(f"压缩包内单个文件超过大小限制（最大 {limit_mb} MB）: {name}")
+
+
+def _check_archive_limits(file_count: int, total_bytes: int) -> None:
+    if file_count > _MAX_ARCHIVE_FILES:
+        raise ValueError(f"压缩包文件数量超过限制（最大 {_MAX_ARCHIVE_FILES} 个）")
+    if total_bytes > _MAX_EXTRACTED_BYTES:
+        limit_mb = _MAX_EXTRACTED_BYTES // (1024 * 1024)
+        raise ValueError(f"压缩包解压后总大小超过限制（最大 {limit_mb} MB）")
+
+
 def _extract_archive_to_memory(data: bytes, url: str, content_type: str) -> dict[str, bytes]:
     """
     将压缩包解压到内存字典 {相对路径: 字节内容}。
     支持 ZIP 和 TAR.GZ 格式。
+
+    安全约束：成员路径必须为安全的相对路径；文件数量、单文件大小与解压后
+    总大小均有上限，超限直接抛 ValueError（由 install_skill 转为安装失败）。
     """
     # 初始化结果字典，用于存储解压后的文件路径和内容
     result: dict[str, bytes] = {}
+    # 已读取（解压后）的累计字节数
+    total_bytes = 0
 
     try:
         # 检查 URL 是否以 .zip 结尾或 content-type 包含 zip
@@ -105,32 +255,53 @@ def _extract_archive_to_memory(data: bytes, url: str, content_type: str) -> dict
             # 使用 io.BytesIO 将字节数据转为内存中的文件对象
             with zipfile.ZipFile(io.BytesIO(data)) as zf:
                 # 遍历 ZIP 包中的所有成员（文件/文件夹）
-                for member in zf.namelist():
-                    # 跳过目录（以/结尾）、__MACOSX 系统文件夹、隐藏文件（以.开头）
-                    if member.endswith("/") or "/__MACOSX/" in member or member.startswith("."):
+                for info in zf.infolist():
+                    member = info.filename
+                    # 先校验原始名称，绝对路径/上溯必须在任何读取之前拒绝
+                    _validate_archive_member_name(member)
+                    # 跳过目录、__MACOSX 系统文件夹、隐藏文件（以.开头）
+                    if info.is_dir() or member.endswith("/") or "/__MACOSX/" in member or member.startswith("."):
                         continue
                     # 按第一个斜杠分割路径，获取相对路径
                     parts = member.split("/", 1)
                     # 如果有多级目录，取第二部分作为相对路径；否则直接用文件名
                     rel_path = parts[1] if len(parts) > 1 else parts[0]
-                    if rel_path:
-                        # 将文件内容读入内存，存入结果字典
-                        result[rel_path] = zf.read(member)
+                    if not rel_path:
+                        continue
+                    # 剥离顶层目录后仍需是安全相对路径
+                    _validate_relative_member_path(rel_path, member)
+                    # 先看声明大小，避免把超大成员读进内存
+                    _check_member_size(info.file_size, member)
+                    _check_archive_limits(len(result) + 1, total_bytes + info.file_size)
+                    # 将文件内容读入内存，存入结果字典
+                    content = zf.read(info)
+                    total_bytes += len(content)
+                    _check_archive_limits(len(result) + 1, total_bytes)
+                    result[rel_path] = content
         else:
             # 处理 tar.gz 格式
             with tarfile.open(fileobj=io.BytesIO(data)) as tf:
                 # 遍历 tar 包中的所有成员
                 for member in tf.getmembers():
+                    _validate_archive_member_name(member.name)
                     # 只处理文件（不是目录），且文件名不以.开头
-                    if member.isfile() and not member.name.startswith("."):
-                        # 按第一个斜杠分割，获取相对路径
-                        parts = member.name.split("/", 1)
-                        rel_path = parts[1] if len(parts) > 1 else parts[0]
-                        if rel_path:
-                            # 提取文件内容
-                            fobj = tf.extractfile(member)
-                            if fobj:
-                                result[rel_path] = fobj.read()
+                    if not member.isfile() or member.name.startswith("."):
+                        continue
+                    # 按第一个斜杠分割，获取相对路径
+                    parts = member.name.split("/", 1)
+                    rel_path = parts[1] if len(parts) > 1 else parts[0]
+                    if not rel_path:
+                        continue
+                    _validate_relative_member_path(rel_path, member.name)
+                    _check_member_size(member.size, member.name)
+                    _check_archive_limits(len(result) + 1, total_bytes + member.size)
+                    # 提取文件内容
+                    fobj = tf.extractfile(member)
+                    if fobj:
+                        content = fobj.read()
+                        total_bytes += len(content)
+                        _check_archive_limits(len(result) + 1, total_bytes)
+                        result[rel_path] = content
     except (zipfile.BadZipFile, tarfile.TarError):
         # 如果压缩包损坏或格式不对，不做任何处理，返回空字典
         pass
@@ -285,31 +456,23 @@ def _validate_skill_in_sandbox(sandbox, skill_name: str, sandbox_skill_dir: str)
     return True, "", files
 
 
-def _install_from_sandbox_to_host(sandbox, sandbox_skill_dir: str, host_skill_dir: Path, files: list[str]) -> list[str]:
+def _relative_installed_files(sandbox_skill_dir: str, files: list[str]) -> list[str]:
+    """把沙箱内绝对文件路径转换成相对 Skill 根目录的路径。
+
+    这里不再写宿主机全局 ``backend/skills``：那会让一个用户安装的 Skill
+    被 SkillsSync 同步进所有用户的沙箱。真正持久化由用户级 Store 完成。
     """
-    从沙箱读取验证通过的文件，写入宿主机 skills 目录。
-    返回已安装的文件列表。
-    """
-    # 初始化已安装文件列表
-    installed = []
-    # 遍历所有需要从沙箱复制的文件
+    prefix = sandbox_skill_dir.rstrip("/") + "/"
+    installed: list[str] = []
     for remote_path in files:
-        try:
-            # 从沙箱读取文件内容（字节）
-            content = sandbox.read_file_bytes(remote_path)
-            # 计算相对于沙箱技能目录的相对路径
+        if remote_path.startswith(prefix):
+            rel = remote_path[len(prefix):]
+        else:
             rel = remote_path.replace(sandbox_skill_dir, "").lstrip("/")
-            # 构建宿主机上的目标文件路径
-            target = host_skill_dir / rel
-            # 创建目标文件所在的目录（如果不存在）
-            target.parent.mkdir(parents=True, exist_ok=True)
-            # 将内容写入宿主机文件
-            target.write_bytes(content)
-            # 记录已安装的文件名
-            installed.append(rel)
-        except Exception as e:
-            # 如果复制失败，记录警告日志但继续处理其他文件
-            agent_logger.warning(f"Failed to copy {remote_path} from sandbox: {e}")
+        parts = rel.split("/")
+        if not rel or any(part in ("", ".", "..") for part in parts):
+            continue
+        installed.append(rel)
     return installed
 
 
@@ -386,9 +549,11 @@ def install_skill(url: str, skill_name: str = "") -> str:
     Returns:
         安装结果说明（含安装路径和文件列表）
     """
-    # 验证 URL 协议是否合法（只支持 HTTP 和 HTTPS）
-    if not url.startswith(("http://", "https://")):
-        return "错误: URL 必须以 http:// 或 https:// 开头"
+    # 验证 URL 协议与目标地址（阻止 SSRF）
+    try:
+        _validate_url(url)
+    except ValueError as e:
+        return f"错误: {str(e)}"
 
     # 标准化 GitHub URL，将仓库页面转为 ZIP 下载链接
     url = _normalize_github_url(url)
@@ -403,20 +568,10 @@ def install_skill(url: str, skill_name: str = "") -> str:
     sandbox = get_sandbox()
 
     try:
-        # Step 1: 下载文件到内存
-        response = httpx.get(
-            url,
-            follow_redirects=True,  # 自动跟随重定向
-            timeout=30,              # 30秒超时
-            headers={"User-Agent": "ERP-Agent/1.0 (Skill Installer)"},  # 设置 User-Agent
-        )
-        # 检查 HTTP 响应状态码
-        if response.status_code != 200:
-            return f"下载失败: HTTP {response.status_code}"
-        # 获取响应头中的 content-type
-        content_type = response.headers.get("content-type", "")
+        # Step 1: 下载文件到内存（带大小上限 + 重定向 SSRF 校验）
+        data, content_type, _ = _http_get_limited(url, _MAX_ARCHIVE_BYTES, timeout=30)
         # 检查下载内容是否为空
-        if len(response.content) == 0:
+        if len(data) == 0:
             return "错误: 下载内容为空"
 
         # 检查沙箱是否可用
@@ -430,10 +585,10 @@ def install_skill(url: str, skill_name: str = "") -> str:
         # 判断是否为压缩包格式
         if _is_archive(url, content_type):
             # 解压到内存字典
-            files_dict = _extract_archive_to_memory(response.content, url, content_type)
+            files_dict = _extract_archive_to_memory(data, url, content_type)
         else:
             # 单文件（SKILL.md），直接保存为字节
-            files_dict = {"SKILL.md": response.text.encode("utf-8")}
+            files_dict = {"SKILL.md": data}
 
         # 如果没有提取到任何文件，清理沙箱临时目录并报错
         if not files_dict:
@@ -469,13 +624,9 @@ def install_skill(url: str, skill_name: str = "") -> str:
             sandbox.execute(f"rm -rf {sandbox_tmp}")
             return f"沙箱验证失败: {err_msg}（已清理沙箱临时文件，未影响宿主机）"
 
-        # Step 5: 验证通过 → 从沙箱复制到宿主机 + 沙箱正式目录
+        # Step 5: 验证通过 → 写入当前用户的沙箱正式目录 + 用户级 Store
         sandbox_verify_dir = f"{sandbox_tmp}/skill"
-        host_skills_dir = Path(SKILLS_DIR)
-        host_skills_dir.mkdir(parents=True, exist_ok=True)
-        host_target = host_skills_dir / skill_name
-
-        installed = _install_from_sandbox_to_host(sandbox, sandbox_verify_dir, host_target, sandbox_files)
+        installed = _relative_installed_files(sandbox_verify_dir, sandbox_files)
 
         # 同步写入当前用户的正式目录；恢复器也使用同一 /skills/custom/<name>/ 协议。
         for rel in installed:
@@ -495,7 +646,7 @@ def install_skill(url: str, skill_name: str = "") -> str:
         )
 
         # 安装依赖（在沙箱内执行 pip install -r requirements.txt）
-        _install_dependencies(host_target)
+        _install_dependencies_in_sandbox(sandbox, sandbox_verify_dir, skill_name)
 
         # 清理沙箱临时文件（释放临时空间）
         sandbox.execute(f"rm -rf {sandbox_tmp}")
@@ -517,7 +668,7 @@ def install_skill(url: str, skill_name: str = "") -> str:
         return (
             f"✅ Skill 安装成功！（沙箱安全验证通过）\n"
             f"名称: {skill_name}\n"
-            f"路径: {host_target}\n"
+            f"路径: /skills/custom/{skill_name}（当前用户沙箱）\n"
             f"文件数: {len(installed)}\n"
             f"{persisted_hint}"
             f"文件列表:\n{file_listing}{truncated_hint}\n"
@@ -525,6 +676,8 @@ def install_skill(url: str, skill_name: str = "") -> str:
             "该 Skill 已通过沙箱安全验证，现已安装到正式环境。"
         )
 
+    except _HttpStatusError as e:
+        return f"下载失败: HTTP {e.status_code}"
     except httpx.TimeoutException:
         # 处理下载超时异常
         return f"下载超时: {url}"
@@ -603,44 +756,29 @@ def _is_archive(url: str, content_type: str) -> bool:
     return False
 
 
-def _install_dependencies(skill_dir: Path):
-    """安装 Skill 的 Python 依赖（优先在沙箱内安装，不回退到宿主机）"""
-    # 检查 requirements.txt 是否存在
-    req_file = skill_dir / "requirements.txt"
-    if not req_file.exists():
-        return
-
-    # 尝试在沙箱内安装依赖
+def _install_dependencies_in_sandbox(sandbox, sandbox_skill_dir: str, skill_name: str) -> None:
+    """安装 Skill 的 Python 依赖到沙箱可执行依赖目录。"""
+    req_path = f"{sandbox_skill_dir}/requirements.txt"
     try:
-        from ..backends.sandbox_holder import get_sandbox
-        sandbox = get_sandbox()
-        if sandbox is not None:
-            # 读取 requirements.txt 内容
-            req_content = req_file.read_text(encoding="utf-8")
-            # 将内容写入沙箱临时文件
-            sandbox_req = f"/workspace/requirements_{skill_dir.name}.txt"
-            sandbox.write_file(sandbox_req, req_content)
-            # 安全容器的根目录为只读，依赖统一落到可写工作区。
-            result = sandbox.execute(
-                "mkdir -p /workspace/python-packages && "
-                "python3 -m pip install --no-cache-dir "
-                "--target /workspace/python-packages "
-                f"-r '{sandbox_req}' -q",
-                timeout=120,
-            )
-            # 清理沙箱临时文件
-            sandbox.execute(f"rm -f {sandbox_req}")
-            if result.exit_code == 0:
-                agent_logger.info(f"Skill dependencies installed in sandbox from {req_file}")
-            else:
-                agent_logger.warning(f"Sandbox dependency install failed: {result.output[:200]}")
+        if not sandbox.file_exists(req_path):
             return
+        req_content = sandbox.read_file_bytes(req_path).decode("utf-8")
+        sandbox_req = f"/tmp/requirements_{skill_name}.txt"
+        sandbox.write_file(sandbox_req, req_content)
+        result = sandbox.execute(
+            f"mkdir -p {SANDBOX_PYTHON_PACKAGES_DIR} && "
+            "python3 -m pip install --no-cache-dir "
+            f"--target {SANDBOX_PYTHON_PACKAGES_DIR} "
+            f"-r '{sandbox_req}' -q",
+            timeout=120,
+        )
+        sandbox.execute(f"rm -f {sandbox_req}")
+        if result.exit_code == 0:
+            agent_logger.info(f"Skill dependencies installed in sandbox: {skill_name}")
+        else:
+            agent_logger.warning(
+                f"Sandbox dependency install failed for {skill_name}: "
+                f"{result.output[:200]}"
+            )
     except Exception as e:
         agent_logger.warning(f"Sandbox dependency install error: {e}")
-
-    # 如果沙箱不可用，仅记录警告，不在宿主机安装依赖
-    # 这样做是为了保持宿主机环境清洁，依赖会在沙箱准备好时安装
-    agent_logger.warning(
-        f"Sandbox unavailable, skipping dependency installation for {req_file}. "
-        "Dependencies will be installed when sandbox is ready."
-    )

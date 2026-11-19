@@ -21,11 +21,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends fonts-wqy-microhei \
     && rm -rf /var/lib/apt/lists/*
 
-# uv 装包比 pip 快一个数量级；依赖固定装进镜像，运行时不需要联网
+# uv 装包比 pip 快一个数量级；依赖预装进镜像，运行时不需要联网
+COPY requirements.sandbox.txt /tmp/requirements.sandbox.txt
 RUN pip install --no-cache-dir uv \
     && uv pip install --system --no-cache \
-        matplotlib numpy pandas
+        -r /tmp/requirements.sandbox.txt \
+    && rm -f /tmp/requirements.sandbox.txt
 
-WORKDIR /workspace
+WORKDIR /mnt/user-data/workspace
 
 CMD ["sleep", "infinity"]

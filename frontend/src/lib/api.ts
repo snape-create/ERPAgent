@@ -99,6 +99,50 @@ export async function deleteConversation(threadId: string): Promise<void> {
   if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
 }
 
+// ===== 文件上传 API =====
+export interface UploadResult {
+  filename: string;
+  size: number;
+}
+
+export async function uploadFiles(files: File[]): Promise<UploadResult[]> {
+  const form = new FormData();
+  form.append("user_id", USER_ID);
+  files.forEach((file) => form.append("files", file));
+
+  const res = await fetch(`${BASE_URL}/uploads`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    let detail = `${res.status}`;
+    try {
+      detail = (await res.json()).detail ?? detail;
+    } catch {
+      // ignore
+    }
+    throw new Error(detail);
+  }
+  const data = await res.json();
+  return data.files ?? [];
+}
+
+export async function deleteUpload(filename: string): Promise<void> {
+  const res = await fetch(
+    `${BASE_URL}/uploads/${encodeURIComponent(filename)}?user_id=${USER_ID}`,
+    { method: "DELETE" }
+  );
+  if (!res.ok) {
+    let detail = `${res.status}`;
+    try {
+      detail = (await res.json()).detail ?? detail;
+    } catch {
+      // ignore
+    }
+    throw new Error(detail);
+  }
+}
+
 // ===== MCP 管理 API =====
 export interface McpServer {
   name: string;

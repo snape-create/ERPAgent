@@ -236,10 +236,9 @@ def test_download_dir_is_single_source():
 
 def test_skills_dir_is_single_source():
     from erpflow.agent import build as agent_build
-    from erpflow.tools import web_fetch
 
+    # install_skill 不再写宿主全局 skills，只有 bootstrap/skills sync 使用 SKILLS_DIR。
     assert agent_build.SKILLS_DIR is SKILLS_DIR
-    assert web_fetch.SKILLS_DIR is SKILLS_DIR
 
 
 # ------------------------------------------------- P1-2 修好的两个缺陷

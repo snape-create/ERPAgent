@@ -19,9 +19,11 @@ from app.gateway.config import get_gateway_config
 from app.gateway.routers.chat import router as chat_router
 from app.gateway.routers.history import router as history_router
 from app.gateway.routers.mcp import router as mcp_router
+from app.gateway.routers.uploads import router as uploads_router
 from app.repositories.mongo import close_mongo_client
 from erpflow.config import DOWNLOAD_DIR
 from erpflow.log_utils import web_logger
+from erpflow.tools.path_safety import UnsafePathError, resolve_under
 
 
 @asynccontextmanager
@@ -60,6 +62,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_router)      # /api/chat/*
     app.include_router(history_router)   # /api/history
     app.include_router(mcp_router)       # /api/mcp/*
+    app.include_router(uploads_router)   # /api/uploads
 
     @app.get("/api/download/{filename}")
     async def download_file(filename: str):
@@ -67,7 +70,10 @@ def create_app() -> FastAPI:
 
         图片/PDF 用 inline，让浏览器直接预览；其他类型保持 attachment 下载。
         """
-        file_path = DOWNLOAD_DIR / filename
+        try:
+            file_path = resolve_under(DOWNLOAD_DIR, filename)
+        except UnsafePathError as exc:
+            raise HTTPException(status_code=400, detail=f"文件名非法: {exc}") from exc
         if not file_path.exists() or not file_path.is_file():
             raise HTTPException(status_code=404, detail=f"文件不存在: {filename}")
 

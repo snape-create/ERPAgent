@@ -25,9 +25,14 @@
 """
 import threading
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
-from ..config import SANDBOX_IDLE_TIMEOUT_MINUTES, SANDBOX_WARM_POOL_SIZE
+from ..config import (
+    SANDBOX_IDLE_TIMEOUT_MINUTES,
+    SANDBOX_USER_DATA_MOUNTS,
+    SANDBOX_WARM_POOL_SIZE,
+)
 from ..log_utils import sandbox_logger
 from .custom_opensandbox import CustomOpenSandbox
 from .sandbox_cache import sandbox_cache
@@ -36,6 +41,7 @@ from .sandbox_entry import (
     SandboxState,
     create_sandbox_container,
     user_container_name,
+    user_data_mounts,
     warm_container_name,
 )
 
@@ -97,7 +103,13 @@ class SandboxManager:
     # ============================================================
 
     def ensure_warm_pool(self) -> None:
-        """确保预热池中有足够的空闲容器。"""
+        """确保预热池中有足够的空闲容器。
+
+        启用 user-data 挂载后，容器创建时必须带上该用户的 uploads/outputs
+        bind mount，而认领后无法补挂载，因此 warm pool 必须停用。
+        """
+        if SANDBOX_USER_DATA_MOUNTS:
+            return
         with self._lock:
             warm_count = sum(
                 1 for entry in self._entries.values()
@@ -138,17 +150,32 @@ class SandboxManager:
         3. 预热池有空闲 → 认领
         4. 新建容器
         """
+        entry = None
         with self._lock:
             container_name = self._user_map.get(user_id)
             if container_name and container_name in self._entries:
                 entry = self._entries[container_name]
-                if entry.is_healthy():
-                    entry.touch()
-                    sandbox_logger.debug(f"Returning existing sandbox for {user_id}")
-                    return entry.sandbox
-                # 容器故障，清理并重建
-                sandbox_logger.warning(f"Sandbox unhealthy for {user_id}, will rebuild")
-                self._remove_entry(entry)
+
+        # Docker 健康检查必须在锁外：daemon 卡住时不能阻塞所有用户请求。
+        if entry is not None:
+            if entry.is_healthy():
+                with self._lock:
+                    if (
+                        self._user_map.get(user_id) == entry.container_name
+                        and self._entries.get(entry.container_name) is entry
+                    ):
+                        entry.touch()
+                        sandbox_logger.debug(
+                            f"Returning existing sandbox for {user_id}"
+                        )
+                        return entry.sandbox
+            else:
+                with self._lock:
+                    self._remove_entry(entry)
+                self._destroy_entry(entry)
+                sandbox_logger.warning(
+                    f"Sandbox unhealthy for {user_id}, will rebuild"
+                )
 
         # 服务重启后优先恢复已有容器，避免先认领预热容器导致旧容器孤儿化。
         restored = self._restore_from_cache(user_id)
@@ -165,9 +192,11 @@ class SandboxManager:
     def _claim_from_warm_pool(self, user_id: str) -> CustomOpenSandbox | None:
         """从预热池中认领一个空闲容器。
 
-        健康检查（Docker ping）和 Mongo 持久化都放到锁外：这两步都可能因为
-        daemon 无响应而阻塞，一旦在锁内卡住，所有对话请求都会排队等死。
+        启用 user-data 挂载时不使用 warm pool：预热容器无法在认领后补挂
+        该用户的 uploads/outputs。
         """
+        if SANDBOX_USER_DATA_MOUNTS:
+            return None
         with self._lock:
             candidates = [
                 entry for entry in self._entries.values()
@@ -176,6 +205,10 @@ class SandboxManager:
 
         for entry in candidates:
             if not entry.is_healthy():
+                # 坏掉的 warm 容器不能一直占着池位，否则池永远补不满。
+                with self._lock:
+                    self._remove_entry(entry)
+                self._destroy_entry(entry)
                 continue
             with self._lock:
                 # 期间可能被别的请求认领，重新确认状态
@@ -190,8 +223,15 @@ class SandboxManager:
             sandbox_logger.info(
                 f"Claimed warm sandbox {entry.container_name} for {user_id}"
             )
-            # 锁外持久化与补池
-            self._persist(entry)
+            # 锁外持久化；失败则销毁，避免容器名仍是 warm-* 被启动清理误删。
+            if not self._persist(entry):
+                with self._lock:
+                    self._remove_entry(entry)
+                self._destroy_entry(entry)
+                sandbox_logger.warning(
+                    f"Failed to persist claimed warm sandbox {entry.container_name}"
+                )
+                return None
             threading.Thread(target=self.ensure_warm_pool, daemon=True).start()
             return entry.sandbox
 
@@ -203,15 +243,22 @@ class SandboxManager:
         正常 Web 链路由 AgentSessionManager 串行创建；这里仍做二次检查，防止其他
         调用方并发进入 Manager 时各自创建并覆盖同一 user_id 的映射。
         """
+        current = None
         with self._lock:
             current_name = self._user_map.get(user_id)
             current = self._entries.get(current_name) if current_name else None
-            if current is not None and current.is_healthy():
-                current.touch()
-                return current.sandbox
+
+        if current is not None and current.is_healthy():
+            with self._lock:
+                if (
+                    self._user_map.get(user_id) == current.container_name
+                    and self._entries.get(current.container_name) is current
+                ):
+                    current.touch()
+                    return current.sandbox
 
         name = user_container_name(user_id)
-        sandbox = create_sandbox_container(name)
+        sandbox = create_sandbox_container(name, user_id=user_id)
 
         entry = SandboxEntry(
             sandbox=sandbox,
@@ -223,21 +270,29 @@ class SandboxManager:
         raced_entry = None
         with self._lock:
             current_name = self._user_map.get(user_id)
-            current = self._entries.get(current_name) if current_name else None
-            if current is not None and current.is_healthy():
-                current.touch()
-                raced_entry = current
-            else:
+            raced_entry = self._entries.get(current_name) if current_name else None
+            if raced_entry is None:
                 self._entries[name] = entry
                 self._user_map[user_id] = name
 
         if raced_entry is not None:
-            # 有并发调用已经抢先成功，锁外清理自己刚创建的多余容器。
-            try:
-                sandbox.destroy_container()
-            except Exception:
-                pass
-            return raced_entry.sandbox
+            # 健康检查在锁外；并发调用抢先成功则销毁自己刚创建的多余容器。
+            if raced_entry.is_healthy():
+                with self._lock:
+                    if self._entries.get(raced_entry.container_name) is raced_entry:
+                        raced_entry.touch()
+                try:
+                    sandbox.destroy_container()
+                except Exception:
+                    pass
+                return raced_entry.sandbox
+
+            with self._lock:
+                if self._entries.get(raced_entry.container_name) is raced_entry:
+                    self._remove_entry(raced_entry)
+                self._entries[name] = entry
+                self._user_map[user_id] = name
+            self._destroy_entry(raced_entry)
 
         self._persist(entry)
         sandbox_logger.info(f"New sandbox created for {user_id}: {name}")
@@ -247,10 +302,12 @@ class SandboxManager:
     # MongoDB 缓存（持久化 user→container 映射）
     # ============================================================
 
-    def _persist(self, entry: SandboxEntry) -> None:
+    def _persist(self, entry: SandboxEntry) -> bool:
         """写入缓存；成功才把状态推进到 CACHED。"""
         if self._cache.persist(entry.to_dict()):
             entry.state = SandboxState.CACHED
+            return True
+        return False
 
     def _restore_from_cache(self, user_id: str) -> CustomOpenSandbox | None:
         """按缓存映射恢复用户容器；容器已停/已删则顺手清缓存。"""
@@ -281,6 +338,22 @@ class SandboxManager:
                 self._cache.delete(user_id)
                 return None
 
+            # 旧版本创建的容器没有 /mnt/user-data bind mount；复用会在
+            # bootstrap/mkdir 时失败。检测到不匹配就清理并重建。
+            if SANDBOX_USER_DATA_MOUNTS and not self._has_expected_user_mounts(
+                container, user_id
+            ):
+                sandbox_logger.warning(
+                    f"Cached container {container_name} lacks user-data mounts, recreating"
+                )
+                try:
+                    container.stop(timeout=3)
+                    container.remove(force=True)
+                except Exception:
+                    pass
+                self._cache.delete(user_id)
+                return None
+
             sandbox = CustomOpenSandbox(container_name=container_name)
             entry = SandboxEntry(
                 sandbox=sandbox,
@@ -303,6 +376,18 @@ class SandboxManager:
         finally:
             docker_client.close()
 
+    def _has_expected_user_mounts(self, container, user_id: str) -> bool:
+        """检查已有容器的 uploads/outputs 挂载是否指向当前用户的目录。"""
+        expected = {
+            str(Path(source).resolve()): target
+            for source, target in user_data_mounts(user_id).items()
+        }
+        mounts = {
+            item.get("Destination"): str(Path(item.get("Source", "")).resolve())
+            for item in (getattr(container, "attrs", {}) or {}).get("Mounts", [])
+        }
+        return all(mounts.get(target) == source for source, target in expected.items())
+
     # ============================================================
     # 重建 / 销毁
     # ============================================================
@@ -310,12 +395,16 @@ class SandboxManager:
     def rebuild(self, user_id: str = "default_user") -> CustomOpenSandbox:
         """重建用户沙箱（故障恢复）。"""
         active_runs = 0
+        old_entry = None
         with self._lock:
             container_name = self._user_map.get(user_id)
             if container_name and container_name in self._entries:
-                entry = self._entries[container_name]
-                active_runs = entry.active_runs
-                self._remove_entry(entry)
+                old_entry = self._entries[container_name]
+                active_runs = old_entry.active_runs
+                self._remove_entry(old_entry)
+
+        if old_entry is not None:
+            self._destroy_entry(old_entry)
 
         sandbox = self._create_for_user(user_id)
         if active_runs:
@@ -327,24 +416,28 @@ class SandboxManager:
 
     def destroy_user_sandbox(self, user_id: str) -> None:
         """销毁用户沙箱。"""
+        entry = None
         with self._lock:
-            container_name = self._user_map.pop(user_id, None)
+            container_name = self._user_map.get(user_id)
             if container_name and container_name in self._entries:
                 entry = self._entries[container_name]
                 self._remove_entry(entry)
-                self._cache.delete(user_id)
-                sandbox_logger.info(f"Sandbox destroyed for user: {user_id}")
+
+        if entry is not None:
+            self._destroy_entry(entry)
+            sandbox_logger.info(f"Sandbox destroyed for user: {user_id}")
+        self._cache.delete(user_id)
 
     def destroy_all(self) -> None:
         """销毁所有沙箱。"""
         with self._lock:
-            for entry in list(self._entries.values()):
-                try:
-                    entry.sandbox.destroy_container()
-                except Exception:
-                    pass
+            entries = list(self._entries.values())
+            for entry in entries:
+                entry.state = SandboxState.DESTROYED
             self._entries.clear()
             self._user_map.clear()
+        for entry in entries:
+            self._destroy_entry(entry)
         sandbox_logger.info("All sandboxes destroyed")
 
     def destroy_warm_sandboxes(self) -> int:
@@ -359,6 +452,8 @@ class SandboxManager:
             for entry in warm:
                 self._remove_entry(entry)
                 removed += 1
+        for entry in warm:
+            self._destroy_entry(entry)
         if removed:
             sandbox_logger.info(f"Destroyed {removed} warm sandbox container(s)")
         return removed
@@ -370,6 +465,8 @@ class SandboxManager:
     def cleanup_idle_sandboxes(self) -> None:
         """回收超时的空闲沙箱。"""
         now = datetime.now()
+        detached: list[SandboxEntry] = []
+        users: list[str] = []
         with self._lock:
             for entry in list(self._entries.values()):
                 if entry.state not in (SandboxState.CLAIMED, SandboxState.CACHED):
@@ -383,11 +480,15 @@ class SandboxManager:
                     f"Reclaiming idle sandbox: {entry.container_name} "
                     f"(idle {idle_time.total_seconds()/60:.0f}min)"
                 )
-                user_id = entry.user_id
+                if entry.user_id:
+                    users.append(entry.user_id)
                 self._remove_entry(entry)
-                if user_id:
-                    self._user_map.pop(user_id, None)
-                    self._cache.delete(user_id)
+                detached.append(entry)
+
+        for entry in detached:
+            self._destroy_entry(entry)
+        for user_id in users:
+            self._cache.delete(user_id)
 
     # ============================================================
     # 健康检查 / 租约
@@ -402,8 +503,8 @@ class SandboxManager:
         """获取用户当前活跃的容器ID（供健康检查中间件使用）。"""
         with self._lock:
             entry = self._entry_of(user_id)
-            if entry is not None and entry.is_healthy():
-                return entry.container_id
+        if entry is not None and entry.is_healthy():
+            return entry.container_id
         return None
 
     def touch(self, user_id: str) -> None:
@@ -434,7 +535,8 @@ class SandboxManager:
     def health_check_all(self) -> None:
         """检查所有沙箱健康状态，故障的在锁外重建。"""
         with self._lock:
-            unhealthy = [e for e in self._entries.values() if not e.is_healthy()]
+            entries = list(self._entries.values())
+        unhealthy = [entry for entry in entries if not entry.is_healthy()]
 
         for entry in unhealthy:
             sandbox_logger.warning(
@@ -448,16 +550,24 @@ class SandboxManager:
     # 内部工具
     # ============================================================
 
-    def _remove_entry(self, entry: SandboxEntry) -> None:
-        """移除并销毁一个条目（必须在锁内调用）。"""
+    def _remove_entry(self, entry: SandboxEntry) -> SandboxEntry:
+        """从内存状态移除一个条目（必须在锁内调用）。
+
+        只改内存状态；Docker 销毁必须由调用方在锁外执行 ``_destroy_entry``。
+        """
+        entry.state = SandboxState.DESTROYED
+        if self._entries.get(entry.container_name) is entry:
+            self._entries.pop(entry.container_name, None)
+        if entry.user_id and self._user_map.get(entry.user_id) == entry.container_name:
+            self._user_map.pop(entry.user_id, None)
+        return entry
+
+    def _destroy_entry(self, entry: SandboxEntry) -> None:
+        """在锁外销毁容器；失败不抛出，避免影响其他条目的清理。"""
         try:
             entry.sandbox.destroy_container()
         except Exception:
             pass
-        entry.state = SandboxState.DESTROYED
-        self._entries.pop(entry.container_name, None)
-        if entry.user_id:
-            self._user_map.pop(entry.user_id, None)
 
 
 # ============================================================

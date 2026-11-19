@@ -186,7 +186,7 @@ class CustomOpenSandbox(BaseSandbox):
 
     def read_file(self, path: str) -> str:
         """读取沙箱内文件内容（文本）"""
-        resp = self.execute(f"cat '{path}'")
+        resp = self.execute(f"cat {shlex.quote(path)}")
         if resp.exit_code != 0:
             raise FileNotFoundError(f"Cannot read file: {path} — {resp.output}")
         return resp.output
@@ -230,7 +230,7 @@ class CustomOpenSandbox(BaseSandbox):
 
     def list_dir(self, path: str = ".") -> list[str]:
         """列出沙箱内目录内容"""
-        resp = self.execute(f"ls -1 '{path}'")
+        resp = self.execute(f"ls -1 {shlex.quote(path)}")
         if resp.exit_code != 0:
             raise FileNotFoundError(f"Cannot list dir: {path} — {resp.output}")
         items = [line.strip() for line in resp.output.strip().split("\n") if line.strip()]
@@ -238,12 +238,12 @@ class CustomOpenSandbox(BaseSandbox):
 
     def file_exists(self, path: str) -> bool:
         """检查文件是否存在"""
-        resp = self.execute(f"test -e '{path}' && echo YES || echo NO")
+        resp = self.execute(f"test -e {shlex.quote(path)} && echo YES || echo NO")
         return "YES" in resp.output
 
     def is_directory(self, path: str) -> bool:
         """检查路径是否为目录"""
-        resp = self.execute(f"test -d '{path}' && echo YES || echo NO")
+        resp = self.execute(f"test -d {shlex.quote(path)} && echo YES || echo NO")
         return "YES" in resp.output
 
     def edit_file(self, path: str, old_text: str, new_text: str) -> str:
@@ -256,7 +256,10 @@ class CustomOpenSandbox(BaseSandbox):
 
     def glob(self, pattern: str, base_path: str = ".") -> list[str]:
         """文件模式匹配（支持递归）"""
-        resp = self.execute(f"find '{base_path}' -path '{pattern}' -type f 2>/dev/null | head -200")
+        resp = self.execute(
+            f"find {shlex.quote(base_path)} -path {shlex.quote(pattern)} "
+            f"-type f 2>/dev/null | head -200"
+        )
         if resp.exit_code != 0:
             return []
         return [line.strip() for line in resp.output.strip().split("\n") if line.strip()]
@@ -264,35 +267,38 @@ class CustomOpenSandbox(BaseSandbox):
     def grep(self, pattern: str, path: str = ".", recursive: bool = True) -> list[str]:
         """在文件中搜索文本模式"""
         flag = "-rn" if recursive else "-n"
-        resp = self.execute(f"grep {flag} '{pattern}' '{path}' 2>/dev/null | head -100")
+        resp = self.execute(
+            f"grep {flag} {shlex.quote(pattern)} {shlex.quote(path)} "
+            f"2>/dev/null | head -100"
+        )
         if resp.exit_code != 0:
             return []
         return [line.strip() for line in resp.output.strip().split("\n") if line.strip()]
 
     def mkdir(self, path: str) -> str:
         """创建目录（含父目录）"""
-        resp = self.execute(f"mkdir -p '{path}'")
+        resp = self.execute(f"mkdir -p {shlex.quote(path)}")
         if resp.exit_code != 0:
             raise OSError(f"Cannot mkdir: {path} — {resp.output}")
         return f"OK: {path}"
 
     def rm(self, path: str) -> str:
         """删除文件或目录"""
-        resp = self.execute(f"rm -rf '{path}'")
+        resp = self.execute(f"rm -rf {shlex.quote(path)}")
         if resp.exit_code != 0:
             raise OSError(f"Cannot rm: {path} — {resp.output}")
         return f"OK: removed {path}"
 
     def cp(self, src: str, dst: str) -> str:
         """复制文件或目录"""
-        resp = self.execute(f"cp -r '{src}' '{dst}'")
+        resp = self.execute(f"cp -r {shlex.quote(src)} {shlex.quote(dst)}")
         if resp.exit_code != 0:
             raise OSError(f"Cannot cp: {src} -> {dst} — {resp.output}")
         return f"OK: {src} -> {dst}"
 
     def mv(self, src: str, dst: str) -> str:
         """移动文件或目录"""
-        resp = self.execute(f"mv '{src}' '{dst}'")
+        resp = self.execute(f"mv {shlex.quote(src)} {shlex.quote(dst)}")
         if resp.exit_code != 0:
             raise OSError(f"Cannot mv: {src} -> {dst} — {resp.output}")
         return f"OK: {src} -> {dst}"
@@ -338,12 +344,18 @@ class CustomOpenSandbox(BaseSandbox):
     # ============================================================
 
     def ping(self) -> bool:
-        """健康检查：容器是否仍在运行"""
+        """健康检查：容器 running 且能实际执行命令。
+
+        只 reload status 无法发现"进程还在但 exec/文件系统已坏"的容器。
+        """
         try:
             if self._container is None:
                 return False
             self._container.reload()
-            return self._container.status == "running"
+            if self._container.status != "running":
+                return False
+            result = self._container.exec_run(["true"])
+            return result.exit_code == 0
         except Exception:
             return False
 
@@ -427,7 +439,7 @@ class CustomOpenSandbox(BaseSandbox):
 
             for start in range(0, len(b64), chunk_size):
                 part = b64[start:start + chunk_size]
-                resp = self.execute(f"printf '%s' '{part}' >> {tmp}")
+                resp = self.execute(f"printf '%s' {shlex.quote(part)} >> {tmp}")
                 if resp.exit_code != 0:
                     raise RuntimeError(
                         f"分块写入失败（offset={start}）: {resp.output[:200]}"
@@ -435,8 +447,8 @@ class CustomOpenSandbox(BaseSandbox):
 
             dir_name = os.path.dirname(path) or "/"
             resp = self.execute(
-                f"mkdir -p '{dir_name}' && "
-                f"base64 -d {tmp} > '{path}' && rm -f {tmp}"
+                f"mkdir -p {shlex.quote(dir_name)} && "
+                f"base64 -d {tmp} > {shlex.quote(path)} && rm -f {tmp}"
             )
             if resp.exit_code != 0:
                 raise RuntimeError(f"base64 解码落盘失败: {resp.output[:200]}")
@@ -489,7 +501,7 @@ class CustomOpenSandbox(BaseSandbox):
         tar_stream.seek(0)
 
         try:
-            self.execute(f"mkdir -p '{remote_dir}'")
+            self.execute(f"mkdir -p {shlex.quote(remote_dir)}")
             self._container.put_archive(remote_dir, tar_stream.read())
             return f"OK: uploaded {local_dir} -> {remote_dir}"
         except Exception as e:

@@ -104,6 +104,7 @@ class FakeManager:
         self.replacement = replacement
         self.rebuild_users: list[str] = []
         self.touched: list[str] = []
+        self.leases = 0
 
     def rebuild(self, user_id: str) -> FakeSandbox:
         self.rebuild_users.append(user_id)
@@ -111,6 +112,13 @@ class FakeManager:
 
     def touch(self, user_id: str) -> None:
         self.touched.append(user_id)
+
+    def acquire_lease(self, user_id: str) -> bool:
+        self.leases += 1
+        return True
+
+    def release_lease(self, user_id: str) -> None:
+        self.leases = max(0, self.leases - 1)
 
 
 @dataclass
@@ -178,6 +186,24 @@ class HealthRecoveryTests(unittest.TestCase):
         self.assertEqual(callback_calls, ["replacement"])
         self.assertTrue(failed.destroyed)
         self.assertIn("alice", manager.touched)
+
+
+class LeaseTests(unittest.TestCase):
+    def test_before_and_after_agent_hold_and_release_lease(self):
+        healthy = FakeSandbox("healthy")
+        proxy = SandboxBackendProxy(healthy)
+        manager = FakeManager(healthy)
+        middleware = SandboxHealthMiddleware(
+            sandbox_manager=manager,
+            user_id="alice",
+            sandbox_backend=proxy,
+            check_interval=9999,
+        )
+
+        middleware.before_agent({}, None)
+        self.assertEqual(manager.leases, 1)
+        middleware.after_agent({}, None)
+        self.assertEqual(manager.leases, 0)
 
 
 class SkillsLifecycleTests(unittest.TestCase):

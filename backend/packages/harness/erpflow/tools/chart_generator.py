@@ -3,7 +3,7 @@
 26种图表类型合并为单一工具，在 Docker 沙箱内执行 matplotlib 生成 PNG。
 
 核心设计（Harness 思想）：
-- 所有图表必须在 Docker 沙箱内生成（/workspace/charts/）
+- 所有图表必须在 Docker 沙箱内生成（/mnt/user-data/outputs/charts/）
 - 用户需要下载时，通过 download_sandbox_file 工具从沙箱提取到本地
 - 沙箱不可用时返回错误，不降级到宿主机执行
 """
@@ -14,6 +14,7 @@ from datetime import datetime
 from langchain_core.tools import tool
 
 from ..backends.sandbox_holder import get_sandbox
+from ..config import SANDBOX_OUTPUTS_DIR, SANDBOX_WORK_DIR
 from ..log_utils import agent_logger
 
 CHART_TYPES = [
@@ -273,12 +274,12 @@ def generate_chart(
     unique = uuid.uuid4().hex[:8]
     safe_title = "".join(c if c.isalnum() or c in "-_" else "_" for c in title[:20])
     output_name = f"chart_{chart_type}_{safe_title}_{timestamp}_{unique}.png"
-    charts_dir = "/workspace/charts"
+    charts_dir = f"{SANDBOX_OUTPUTS_DIR}/charts"
     output_path = f"{charts_dir}/{output_name}"
     params_filename = f"_params_{timestamp}_{unique}.json"
     script_filename = f"_chart_script_{timestamp}_{unique}.py"
-    params_path = f"{charts_dir}/{params_filename}"
-    script_path = f"{charts_dir}/{script_filename}"
+    params_path = f"{SANDBOX_WORK_DIR}/{params_filename}"
+    script_path = f"{SANDBOX_WORK_DIR}/{script_filename}"
 
     # 构建执行参数
     params = {

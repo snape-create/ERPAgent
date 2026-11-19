@@ -10,9 +10,37 @@
 image = "erp-agent-sandbox:latest"
 
 # 沙箱内目录
-work_dir = "/workspace"    # 工作目录（SANDBOX_WORK_DIR）
+user_data_root = "/mnt/user-data"   # 用户数据根（uploads/outputs/workspace）
+work_dir = "/mnt/user-data/workspace"  # 工作目录（SANDBOX_WORK_DIR）
 skills_dir = "/skills"     # 技能目录（SANDBOX_SKILLS_DIR）
 memories_dir = "/memories" # 记忆目录（SANDBOX_MEMORIES_DIR）
+python_packages_dir = "/opt/pydeps"  # 可执行依赖目录（不能放 noexec 的 workspace）
+
+# 宿主机 user-data 根目录；相对路径按 backend/ 解析。
+# 实际布局：{data_root}/users/{user_id}/user-data/{uploads,outputs}
+data_root = ".sandbox"
+
+# uploads/outputs 绑定到宿主机；workspace 保持 tmpfs。
+# 启用后预热池无法在认领时改变挂载，因此 warm pool 自动停用。
+user_data_mounts = true
+
+# 上传大小上限（MB）与 user-data 清理策略。
+max_upload_mb = 25
+max_user_upload_mb = 200
+
+# web_fetch / install_skill 网络安全与下载限制
+allow_private_web = false   # 默认拒绝 loopback/私网/链路本地地址
+max_fetch_mb = 5
+max_archive_mb = 20
+max_extracted_mb = 50
+max_archive_files = 500
+uploads_ttl_days = 30
+outputs_ttl_days = 30
+user_data_cleanup_interval_seconds = 3600
+
+# 仅本地开发：沙箱不可用时允许从宿主机 download/ 目录读取文件。
+# 生产必须保持 false。（SANDBOX_ALLOW_LOCAL_FALLBACK）
+allow_local_fallback = false
 
 # 预热池大小：常驻空闲容器数量（SANDBOX_WARM_POOL_SIZE）
 warm_pool_size = 2
@@ -31,9 +59,17 @@ health_check_interval_seconds = 30
 read_only = true           # 文件系统只读 + tmpfs 可写
 memory_limit = "512m"      # 内存上限
 cpu_limit = 1.0            # CPU 上限（核数）
-network_mode = "bridge"    # bridge = 受限联网，none = 完全隔离
-tmpfs_size = "128m"        # tmpfs 可写区域大小
+network_mode = "none"      # none = 完全隔离（推荐），bridge = 受限联网
+tmpfs_size = "128m"        # /tmp tmpfs 大小
+workspace_size = "256m"    # /mnt/user-data/workspace tmpfs 大小
+skills_size = "128m"       # /skills tmpfs 大小
+pydeps_size = "512m"       # /opt/pydeps exec tmpfs 大小
+uploads_size = "128m"      # 未 bind mount 时的 uploads tmpfs 大小
+outputs_size = "256m"      # 未 bind mount 时的 outputs tmpfs 大小
 drop_all_caps = true       # 移除全部 Linux Capability
 use_seccomp = true         # 启用 seccomp 系统调用白名单
 seccomp_path = ""          # 自定义 seccomp 路径（空则用内置 seccomp.json）
 runtimes = ["python"]      # 多语言运行时：["python", "go", "node"]
+# 安全容器创建失败时是否允许退回无防护的普通容器。
+# 默认 false（fail closed）；仅限本地调试显式打开，生产环境禁止。
+allow_insecure_fallback = false

@@ -17,7 +17,15 @@ from pathlib import Path
 
 import docker
 
-from ..config import SANDBOX_CONTAINER, SANDBOX_IMAGE, SANDBOX_WORK_DIR
+from ..config import (
+    SANDBOX_CONTAINER,
+    SANDBOX_IMAGE,
+    SANDBOX_OUTPUTS_DIR,
+    SANDBOX_PYTHON_PACKAGES_DIR,
+    SANDBOX_UPLOADS_DIR,
+    SANDBOX_USER_DATA_ROOT,
+    SANDBOX_WORK_DIR,
+)
 from ..log_utils import sandbox_logger
 from .custom_opensandbox import CustomOpenSandbox
 
@@ -40,9 +48,16 @@ class SandboxConfig:
     cpu_limit: float = SANDBOX_CONTAINER["cpu_limit"]
     network_mode: str = SANDBOX_CONTAINER["network_mode"]
     tmpfs_size: str = SANDBOX_CONTAINER["tmpfs_size"]
+    workspace_size: str = SANDBOX_CONTAINER["workspace_size"]
+    skills_size: str = SANDBOX_CONTAINER["skills_size"]
+    pydeps_size: str = SANDBOX_CONTAINER["pydeps_size"]
+    uploads_size: str = SANDBOX_CONTAINER["uploads_size"]
+    outputs_size: str = SANDBOX_CONTAINER["outputs_size"]
     drop_all_caps: bool = SANDBOX_CONTAINER["drop_all_caps"]
     use_seccomp: bool = SANDBOX_CONTAINER["use_seccomp"]
     seccomp_path: str = SANDBOX_CONTAINER["seccomp_path"]
+    # 安全容器创建失败时是否允许退回无防护容器；默认 fail closed。
+    allow_insecure_fallback: bool = SANDBOX_CONTAINER["allow_insecure_fallback"]
 
     # --- 多语言运行时 ---
     # 指定需要安装的运行时列表: ["python", "go", "node"]
@@ -51,12 +66,31 @@ class SandboxConfig:
     # --- 环境变量注入 ---
     env_vars: dict[str, str] = field(default_factory=dict)
 
+    # --- 宿主机 bind mount：host_path -> container_path ---
+    # 目前只挂 uploads/outputs；workspace 是 tmpfs，不持久化。
+    volumes: dict[str, str] = field(default_factory=dict)
+
 
 # ============================================================
 # 内置 seccomp 路径
 # ============================================================
 
 _BUILTIN_SECCOMP = str(Path(__file__).parent / "seccomp.json")
+
+# 只允许明确安全的网络模式。host / container:<id> 会突破网络隔离，
+# 自定义 Docker 网络也不在白名单内，需要时先扩白名单并评审。
+_ALLOWED_NETWORK_MODES = frozenset({"none", "bridge"})
+
+
+def validate_network_mode(network_mode: str) -> str:
+    """校验并返回安全的 Docker 网络模式；非法模式直接拒绝。"""
+    mode = (network_mode or "none").strip()
+    if mode not in _ALLOWED_NETWORK_MODES:
+        raise ValueError(
+            f"Unsafe sandbox network_mode '{mode}'. "
+            f"Allowed: {', '.join(sorted(_ALLOWED_NETWORK_MODES))}"
+        )
+    return mode
 
 
 # ============================================================
@@ -82,11 +116,29 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
     if config is None:
         config = SandboxConfig()
 
+    network_mode = validate_network_mode(config.network_mode)
+
     seccomp_path = config.seccomp_path or _BUILTIN_SECCOMP
     seccomp_profile = None
     if config.use_seccomp and Path(seccomp_path).exists():
         with open(seccomp_path) as f:
             seccomp_profile = f.read()
+    elif config.use_seccomp:
+        sandbox_logger.warning(
+            f"seccomp enabled but profile not found: {seccomp_path}; "
+            "container will start WITHOUT seccomp"
+        )
+    else:
+        sandbox_logger.warning("seccomp is disabled by configuration")
+
+    if not config.read_only:
+        sandbox_logger.warning("sandbox read_only is disabled by configuration")
+    if not config.drop_all_caps:
+        sandbox_logger.warning("sandbox drop_all_caps is disabled by configuration")
+    if network_mode == "bridge":
+        sandbox_logger.warning(
+            "sandbox network_mode=bridge allows network egress; use 'none' for isolation"
+        )
 
     client = docker.from_env()
 
@@ -100,30 +152,62 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
         pass
 
     # 构建安全参数
-    host_config_kwargs = {
-        "read_only": config.read_only,
-        "mem_limit": config.memory_limit,
-        "nano_cpus": int(config.cpu_limit * 1e9),
-        "pids_limit": 256,
-        "tmpfs": {
-            "/tmp": f"rw,noexec,nosuid,size={config.tmpfs_size}",
-            "/workspace": "rw,noexec,nosuid,size=256m",
-            # ``--read-only`` 会让根目录下的 /skills 不可写；Skills 同步、
-            # 用户 Skills 恢复都必须在独立的可写挂载点完成。
-            "/skills": "rw,nosuid,nodev,size=128m",
-        },
+    tmpfs = {
+        "/tmp": f"rw,noexec,nosuid,size={config.tmpfs_size}",
+        # 兼容旧路径；新工具统一使用 /mnt/user-data。
+        "/workspace": "rw,noexec,nosuid,size=256m",
+        # workspace 是临时的（Q3=A）；uploads/outputs 由 bind mount 覆盖。
+        f"{SANDBOX_USER_DATA_ROOT}/workspace": "rw,noexec,nosuid,size=256m",
+        # Python 依赖必须放在可执行挂载点：workspace 是 noexec，
+        # 从那里加载 C 扩展会 "failed to map segment from shared object"。
+        SANDBOX_PYTHON_PACKAGES_DIR: "rw,exec,nosuid,nodev,size=512m",
+        # ``--read-only`` 会让根目录下的 /skills 不可写；Skills 同步、
+        # 用户 Skills 恢复都必须在独立的可写挂载点完成。
+        "/skills": "rw,nosuid,nodev,size=128m",
     }
 
-    # 网络模式
-    if config.network_mode == "none":
-        host_config_kwargs["network_mode"] = "none"
+    # 宿主机 bind mount（uploads/outputs）。Docker SDK 要求 host path 为绝对路径。
+    bind_targets = set(config.volumes.values())
+    if config.volumes:
+        host_config_kwargs = {
+            "read_only": config.read_only,
+            "mem_limit": config.memory_limit,
+            "nano_cpus": int(config.cpu_limit * 1e9),
+            "pids_limit": 256,
+            "volumes": {
+                str(host_path): {"bind": container_path, "mode": "rw"}
+                for host_path, container_path in config.volumes.items()
+            },
+        }
     else:
-        host_config_kwargs["network_mode"] = config.network_mode
+        host_config_kwargs = {
+            "read_only": config.read_only,
+            "mem_limit": config.memory_limit,
+            "nano_cpus": int(config.cpu_limit * 1e9),
+            "pids_limit": 256,
+        }
+
+    # 没有 bind mount 时，uploads/outputs 仍是可写 tmpfs（如 warm pool 或
+    # user_data_mounts=false）；避免在只读 rootfs 上 mkdir 失败。
+    if SANDBOX_UPLOADS_DIR not in bind_targets:
+        tmpfs[SANDBOX_UPLOADS_DIR] = (
+            f"rw,noexec,nosuid,size={config.uploads_size}"
+        )
+    if SANDBOX_OUTPUTS_DIR not in bind_targets:
+        tmpfs[SANDBOX_OUTPUTS_DIR] = (
+            f"rw,noexec,nosuid,size={config.outputs_size}"
+        )
+    host_config_kwargs["tmpfs"] = tmpfs
+
+    # 网络模式（已通过白名单校验）
+    host_config_kwargs["network_mode"] = network_mode
 
     # Capability 安全
     if config.drop_all_caps:
         host_config_kwargs["cap_drop"] = ["ALL"]
-        # 仅添加运行必需的最小 Capability
+        # 仅添加运行必需的最小 Capability。
+        # DAC_OVERRIDE 用于写宿主机 bind mount（宿主 UID 创建的目录，容器 root
+        # 不是 owner）。若改为以宿主 UID 运行容器，可移除它。
         host_config_kwargs["cap_add"] = ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE"]
 
     # seccomp 安全策略
@@ -144,9 +228,10 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
     environment = {
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONUNBUFFERED": "1",
-        # 根文件系统保持只读时，第三方依赖安装到工作区而非 /usr/local。
-        "PIP_TARGET": "/workspace/python-packages",
-        "PYTHONPATH": "/workspace/python-packages",
+        # 根文件系统保持只读时，第三方依赖安装到独立可执行挂载点，
+        # 而不是 noexec 的 workspace。
+        "PIP_TARGET": SANDBOX_PYTHON_PACKAGES_DIR,
+        "PYTHONPATH": SANDBOX_PYTHON_PACKAGES_DIR,
     }
     environment.update(config.env_vars)
 
@@ -154,7 +239,7 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
         sandbox_logger.info(
             f"Creating secure sandbox: {config.name} "
             f"(image={config.image}, memory={config.memory_limit}, "
-            f"cpu={config.cpu_limit}, network={config.network_mode})"
+            f"cpu={config.cpu_limit}, network={network_mode})"
         )
 
         container = client.containers.run(
@@ -172,9 +257,9 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
         )
 
     except Exception as e:
-        # 安全创建失败时，回退到基础模式
-        sandbox_logger.warning(
-            f"Secure sandbox creation failed ({e}), falling back to basic mode"
+        # 安全创建失败时默认 fail closed，绝不能静默降级成无防护容器。
+        sandbox_logger.error(
+            f"Secure sandbox creation failed for {config.name}: {e}"
         )
         try:
             existing = client.containers.get(config.name)
@@ -183,6 +268,17 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
         except docker.errors.NotFound:
             pass
 
+        if not config.allow_insecure_fallback:
+            client.close()
+            raise RuntimeError(
+                f"Refusing insecure sandbox fallback for {config.name}: {e}"
+            ) from e
+
+        # 仅开发调试显式开启；即使回退也保留网络白名单设置。
+        sandbox_logger.warning(
+            "allow_insecure_fallback=true: creating sandbox WITHOUT read-only "
+            "rootfs, memory/CPU/pids limits, capability drop, or seccomp"
+        )
         container = client.containers.run(
             image=config.image,
             name=config.name,
@@ -190,9 +286,15 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
             detach=True,
             working_dir=config.work_dir,
             environment=environment,
+            volumes={
+                str(host_path): {"bind": container_path, "mode": "rw"}
+                for host_path, container_path in config.volumes.items()
+            } or None,
+            network_mode=network_mode,
         )
         sandbox_logger.info(
-            f"Basic sandbox created (fallback): {config.name} ({container.id[:12]})"
+            f"Basic sandbox created (INSECURE fallback): "
+            f"{config.name} ({container.id[:12]})"
         )
 
     client.close()
@@ -247,14 +349,27 @@ def _init_python_runtime(sandbox: CustomOpenSandbox):
     else:
         sandbox_logger.warning("Python not available in sandbox")
 
-    # 安装常用数据分析包
+    # 镜像已预装就跳过；只有缺失时才尝试安装（network none 时安装会失败）。
+    check = sandbox.execute(
+        "python3 -c 'import matplotlib, numpy, pandas' 2>/dev/null"
+    )
+    if check.exit_code == 0:
+        sandbox_logger.info("Python packages already available in image")
+        return
+
     resp = sandbox.execute(
-        "mkdir -p /workspace/python-packages && "
-        "python3 -m pip install --no-cache-dir --target /workspace/python-packages "
+        f"mkdir -p {SANDBOX_PYTHON_PACKAGES_DIR} && "
+        "python3 -m pip install --no-cache-dir "
+        f"--target {SANDBOX_PYTHON_PACKAGES_DIR} "
         "matplotlib pandas numpy -q 2>&1 | tail -5"
     )
     if resp.exit_code == 0:
         sandbox_logger.info("Python packages installed: matplotlib, pandas, numpy")
+    else:
+        sandbox_logger.warning(
+            "Python packages missing and runtime install failed "
+            f"(preinstall them in the sandbox image): {resp.output[-300:]}"
+        )
 
 
 def _init_go_runtime(sandbox: CustomOpenSandbox):

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from langchain.agents.middleware import AgentMiddleware, AgentState, Runtime
 from langgraph.store.base import BaseStore
 
-from ..config import skills_store_namespace
+from ..config import SANDBOX_PYTHON_PACKAGES_DIR, skills_store_namespace
 from ..log_utils import middleware_logger
 
 if TYPE_CHECKING:
@@ -198,9 +198,9 @@ class UserSkillsRestoreMiddleware(AgentMiddleware[AgentState[Any], None, Any]):
         for requirement_path in sorted(requirement_paths):
             try:
                 result = self._sandbox_backend.execute(
-                    "mkdir -p /workspace/python-packages && "
+                    f"mkdir -p {SANDBOX_PYTHON_PACKAGES_DIR} && "
                     "python3 -m pip install --no-cache-dir "
-                    "--target /workspace/python-packages "
+                    f"--target {SANDBOX_PYTHON_PACKAGES_DIR} "
                     f"-r '{requirement_path}' -q",
                     timeout=120,
                 )

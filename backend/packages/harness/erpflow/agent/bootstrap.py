@@ -12,11 +12,18 @@ import hashlib
 import io
 import tarfile
 
-from ..config import BACKEND_ROOT
+from ..config import (
+    BACKEND_ROOT,
+    SANDBOX_OUTPUTS_DIR,
+    SANDBOX_PYTHON_PACKAGES_DIR,
+    SANDBOX_SKILLS_DIR,
+    SANDBOX_UPLOADS_DIR,
+    SANDBOX_WORK_DIR,
+)
 from ..log_utils import agent_logger
 
-# 沙箱内落点统一在 /workspace/src 下
-REMOTE_ROOT = "/workspace/src"
+# 沙箱内落点统一在临时 workspace 下（不放 uploads/outputs 持久目录）
+REMOTE_ROOT = f"{SANDBOX_WORK_DIR}/.erpflow"
 
 # 上传清单：(沙箱内相对路径, 宿主机目录)
 UPLOAD_ENTRIES = (
@@ -71,7 +78,7 @@ def _fingerprint(files: list[tuple[object, str]]) -> str:
 
 def _upload_files(sandbox, files: list[tuple[object, str]], fingerprint: str) -> bool:
     """把文件打成 tar 上传并解包；返回是否真的传了（命中标记则跳过）。"""
-    marker_path = "/workspace/.erp-bootstrap-fingerprint"
+    marker_path = f"{SANDBOX_WORK_DIR}/.erp-bootstrap-fingerprint"
     current = sandbox.execute(f"cat '{marker_path}' 2>/dev/null")
     if current.exit_code == 0 and current.output.strip() == fingerprint:
         agent_logger.info(
@@ -92,18 +99,18 @@ def _upload_files(sandbox, files: list[tuple[object, str]], fingerprint: str) ->
     # 仅使用 BaseSandbox 的公开协议上传；这样 SandboxBackendProxy 热替换
     # 底层容器后，项目上传仍能工作，且不会依赖 Docker 私有 _container。
     #
-    # 必须落在 /workspace（显式挂载的 tmpfs）而不是 /tmp：
+    # 必须落在 workspace（显式挂载的 tmpfs）而不是 /tmp：
     # 容器以 read_only 启动，Docker 的 put_archive 在只读 rootfs 上会直接
     # 拒绝请求（"container rootfs is marked read-only"），即使 /tmp 本身
     # 是 tmpfs 可写也无法绕过，因为这是 daemon 层的检查。
-    archive_path = "/workspace/.erp-agent-project.tar.gz"
+    archive_path = f"{SANDBOX_WORK_DIR}/.erp-agent-project.tar.gz"
     responses = sandbox.upload_files([(archive_path, data)])
     errors = [getattr(item, "error", None) for item in responses]
     if not responses or any(errors):
         raise RuntimeError(f"archive upload failed: {errors or 'no response'}")
 
     # --no-same-owner/--no-same-permissions 不能省：
-    # 容器以 root 运行时 tar 默认按归档还原权限并 chmod，而 /workspace 是
+    # 容器以 root 运行时 tar 默认按归档还原权限并 chmod，而 workspace 是
     # 挂载了 nosuid,nodev 的 tmpfs，chmod 会被拒（"Cannot change mode"），
     # tar 因此以 exit 2 结束，尽管文件其实都解压成功了。
     unpack = sandbox.execute(
@@ -141,8 +148,9 @@ def _upload_project_to_sandbox(sandbox) -> bool:
 def bootstrap_sandbox(sandbox) -> None:
     """填充一个新领取或重建后的沙箱，使其可立即继续 Agent 工作。"""
     setup = sandbox.execute(
-        "mkdir -p /workspace/charts /workspace/output /workspace/data "
-        "/workspace/python-packages /skills"
+        f"mkdir -p {SANDBOX_WORK_DIR} {SANDBOX_WORK_DIR}/data "
+        f"{SANDBOX_WORK_DIR}/analysis {SANDBOX_OUTPUTS_DIR} "
+        f"{SANDBOX_UPLOADS_DIR} {SANDBOX_PYTHON_PACKAGES_DIR} {SANDBOX_SKILLS_DIR}"
     )
     if setup.exit_code != 0:
         raise RuntimeError(f"sandbox directory setup failed: {setup.output}")
@@ -151,8 +159,8 @@ def bootstrap_sandbox(sandbox) -> None:
         raise RuntimeError("project bootstrap upload failed")
 
     skills_copy = sandbox.execute(
-        "mkdir -p /skills && "
-        f"cp -r {REMOTE_ROOT}/skills/. /skills/ 2>/dev/null || true"
+        f"mkdir -p {SANDBOX_SKILLS_DIR} && "
+        f"cp -r {REMOTE_ROOT}/skills/. {SANDBOX_SKILLS_DIR}/"
     )
     if skills_copy.exit_code != 0:
         raise RuntimeError(f"core Skills bootstrap failed: {skills_copy.output}")
