@@ -29,7 +29,8 @@ const STATUS = {
  * 在流式输出时用户视线就在这一带，所以不浮动、不遮挡正文。
  */
 export default function TodoListPanel({ items, visible }: Props) {
-  const [open, setOpen] = useState(true);
+  // 默认折叠：任务步骤是参考信息，不该长期占用输入框上方的空间
+  const [open, setOpen] = useState(false);
 
   if (!visible || items.length === 0) return null;
 

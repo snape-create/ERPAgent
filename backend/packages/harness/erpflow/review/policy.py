@@ -132,6 +132,7 @@ class ReviewPolicy:
         update = {"review_decision": decision, "review_result": None,
                   "_review_start": turn_start(state.get("messages", [])),
                   "_review_write_attempted": False, "_review_signals": [],
+                  "_review_budget_exhausted": False,
                   **reset_grading(rubric)}
         if not explicit and (rubric or state.get("rubric") or state.get("_harness_rubric_source")):
             update.update(rubric=rubric, _harness_rubric_source="auto" if rubric else "")

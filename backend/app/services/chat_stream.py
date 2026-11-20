@@ -30,6 +30,10 @@ from erpflow.log_utils import web_logger
 # 客户端断流时最后一次落库的最长等待（秒）
 FINAL_PERSIST_TIMEOUT_SECONDS = 3
 
+# SSE 心跳间隔（秒）：模型长时间思考 / 工具执行时不发事件，
+# 中间的代理会以为连接空闲而断开，必须定期写一行注释保活。
+HEARTBEAT_INTERVAL_SECONDS = 10
+
 # LangGraph Server 侧注册的图名与需要的流模式（messages-tuple 由服务端改写为 messages）
 ASSISTANT_ID = "lead_agent"
 STREAM_MODES = ["messages-tuple", "values", "custom"]
@@ -107,6 +111,51 @@ async def _dispatch_chunk(
     return [], False
 
 
+async def _with_heartbeat(
+    events: AsyncIterator[str],
+    interval: float = HEARTBEAT_INTERVAL_SECONDS,
+) -> AsyncGenerator[str]:
+    """在事件流空闲时补 SSE 注释行，保持连接活着。
+
+    用后台 producer 把原生成器写进队列，消费端带超时等待：
+    超时就 yield ``": keepalive\\n\\n"``（SSE 注释，前端会忽略），再继续等。
+    producer 的异常通过队列转交消费端重新抛出，不能吞掉。
+    """
+    queue: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
+
+    async def _produce() -> None:
+        try:
+            async for item in events:
+                await queue.put(("event", item))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await queue.put(("error", exc))
+        else:
+            await queue.put(("end", None))
+
+    producer = asyncio.create_task(_produce())
+    try:
+        while True:
+            try:
+                kind, payload = await asyncio.wait_for(queue.get(), timeout=interval)
+            except TimeoutError:
+                yield ": keepalive\n\n"
+                continue
+            if kind == "end":
+                return
+            if kind == "error":
+                raise payload
+            yield payload
+    finally:
+        # 消费端提前退出（中断 / 客户端断流）时必须收掉 producer，否则任务泄漏
+        producer.cancel()
+        try:
+            await producer
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
 async def _stream_turn(
     turn: ChatTurn,
     source: StreamSource,
@@ -123,12 +172,20 @@ async def _stream_turn(
         for name, data in events:
             yield sse_event(name, data)
         if interrupted:
+            # 审批卡片必须先发出去，前端才能渲染卡片；收尾放 done 之前
             await turn.finish_interrupted()
             yield sse_event("done", {"thread_id": thread_id, "interrupted": True})
             return
 
-    await on_complete()
+    # 正常结束：先发 done 让前端立刻收尾，再做 trace / 会话落库，
+    # 避免写库耗时拖住最后一个事件。
     yield sse_event("done", {"thread_id": thread_id, "interrupted": False})
+    # done 已经发出，收尾失败不能再冒泡成第二个 error/done；
+    # 这里自己记录，最终落库仍由 stream_chat_response 的 finally 兜底。
+    try:
+        await on_complete()
+    except Exception as exc:
+        web_logger.warning(f"Failed to finalize turn {thread_id}: {exc}")
 
 
 async def _adapt_server_stream(stream: AsyncIterator) -> AsyncGenerator[tuple[list[str], str, object]]:
@@ -174,7 +231,7 @@ async def _final_persist(turn: ChatTurn, display_messages: Iterable, thread_id: 
         return
     try:
         await asyncio.wait_for(
-            asyncio.shield(turn.persist()), timeout=FINAL_PERSIST_TIMEOUT_SECONDS
+            asyncio.shield(turn.flush_persist()), timeout=FINAL_PERSIST_TIMEOUT_SECONDS
         )
     except (TimeoutError, asyncio.CancelledError):
         pass
@@ -225,11 +282,13 @@ async def stream_chat_response(
         )
 
         try:
-            async for event in _stream_turn(
-                turn,
-                _adapt_server_stream(stream),
-                thread_id,
-                on_complete=partial(turn.finish_completed, user_id, message),
+            async for event in _with_heartbeat(
+                _stream_turn(
+                    turn,
+                    _adapt_server_stream(stream),
+                    thread_id,
+                    on_complete=partial(turn.finish_completed, user_id, message),
+                )
             ):
                 yield event
         finally:

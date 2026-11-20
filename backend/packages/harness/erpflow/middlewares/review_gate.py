@@ -7,6 +7,7 @@ from typing import Any
 from deepagents import RubricMiddleware
 from langchain.agents.middleware import AgentMiddleware, Runtime, hook_config
 
+from ..config import MAX_TOOL_CALLS
 from ..review import HarnessPhaseState, ReviewRoute, compose_rubric, reset_grading
 
 # 审批事实作为“可信上下文”注入 rubric（rubric 是可信输入，transcript 不是）。
@@ -36,6 +37,8 @@ def execution_signals(state: HarnessPhaseState) -> tuple[list[str], bool]:
     signals = set()
     writes = False
     calls = []
+    tool_count = 0
+    budget_exhausted = False
     for m in messages:
         for call in getattr(m, "tool_calls", []) or []:
             name = call.get("name", "").lower()
@@ -49,9 +52,14 @@ def execution_signals(state: HarnessPhaseState) -> tuple[list[str], bool]:
                 writes = True
                 signals.add("delegated_task")
         if getattr(m, "type", "") == "tool":
+            tool_count += 1
             content = getattr(m, "content", "")
             error = getattr(m, "status", "") == "error"
             if isinstance(content, str):
+                # 工具额度耗尽后，后续工具都会被拦下；此时再复审只会得到
+                # “证据不足”的结论并逼模型反复道歉。
+                if "tool call limit exceeded" in content.lower():
+                    budget_exhausted = True
                 try:
                     data = json.loads(content)
                     error |= isinstance(data, dict) and (data.get("success") is False or bool(data.get("error")))
@@ -59,6 +67,8 @@ def execution_signals(state: HarnessPhaseState) -> tuple[list[str], bool]:
                     error |= content.lstrip().lower().startswith(("error", "错误", "失败"))
             if error:
                 signals.add("tool_error")
+    if budget_exhausted or tool_count >= MAX_TOOL_CALLS:
+        signals.add("tool_budget_exhausted")
     if len(calls) >= 3:
         signals.add("multiple_tool_calls")
     if len({n for n in calls if any(x in n for x in ("search", "fetch", "query"))}) >= 2:
@@ -81,6 +91,17 @@ class ReviewExecutionGate(AgentMiddleware[HarnessPhaseState, None, Any]):
             "_review_signals": signals,
             "_review_write_attempted": writes,
         }
+        # 工具额度已耗尽：不再触发复审（否则会要求补证，但工具全被拦截）
+        if "tool_budget_exhausted" in signals:
+            updates["_review_budget_exhausted"] = True
+            updates["review_decision"] = {
+                **state.get("review_decision", {}),
+                "decision": "skip",
+                "source": "tool_budget",
+                "signals": signals,
+                "reason": "工具额度已用尽，停止复审",
+            }
+            return updates
         if not signals or self.config.get("review", {}).get("mode") == "never":
             return updates
         if not state.get("rubric"):
@@ -102,6 +123,8 @@ class SafeRubricMiddleware(RubricMiddleware):
     def after_agent(
         self, state: HarnessPhaseState, runtime: Runtime[None]
     ) -> dict[str, Any] | None:
+        if state.get("_review_budget_exhausted"):
+            return None
         state = _with_approval_context(state)
         if state.get("_review_write_attempted"):
             return self._write_reviewer.after_agent(state, runtime)
@@ -111,6 +134,8 @@ class SafeRubricMiddleware(RubricMiddleware):
     async def aafter_agent(
         self, state: HarnessPhaseState, runtime: Runtime[None]
     ) -> dict[str, Any] | None:
+        if state.get("_review_budget_exhausted"):
+            return None
         state = _with_approval_context(state)
         if state.get("_review_write_attempted"):
             return await self._write_reviewer.aafter_agent(state, runtime)

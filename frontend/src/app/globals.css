@@ -332,29 +332,29 @@ textarea:focus-visible {
   animation: riseIn 320ms var(--ease-quiet) both;
 }
 
-/* 仅用于真实的进行中状态（流式输出） */
-@keyframes dot-fade {
+/* 正在思考的三个冒泡点：只用于真实的进行中状态 */
+@keyframes bubbleDot {
   0%,
+  80%,
   100% {
     opacity: 0.25;
+    transform: scale(0.75);
   }
-  50% {
+  40% {
     opacity: 1;
+    transform: scale(1);
   }
 }
-.typing-dot {
-  animation: dot-fade 1.2s ease-in-out infinite;
-}
-.typing-dot:nth-child(2) {
-  animation-delay: 0.16s;
-}
-.typing-dot:nth-child(3) {
-  animation-delay: 0.32s;
+.bubbling-dot {
+  animation: bubbleDot 1.2s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .animate-rise,
-  .typing-dot {
+  .bubbling-dot {
     animation: none;
+  }
+  .bubbling-dot {
+    opacity: 0.6;
   }
 }

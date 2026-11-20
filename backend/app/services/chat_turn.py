@@ -6,6 +6,8 @@ todo_update / review_result / interrupt），并负责展示消息的节流持�
 一个 ``ChatTurn`` 实例 = 一次请求；调用方只做三件事：
     拿到事件 → 通过 SSE 下发 → 出错时兜底保存
 """
+import asyncio
+import copy
 import json
 import re
 import time
@@ -20,6 +22,7 @@ from app.repositories.conversations import (
 from app.services.hitl import build_interrupt_event, enrich_status_change
 from app.services.langgraph_adapter import message_field, unwrap_interrupt
 from app.services.sse import PERSIST_INTERVAL_SECONDS
+from erpflow.log_utils import web_logger
 
 # Harness 阶段 → 前端展示文案（进度由阶段条表达，文案保持纯文字）
 PHASE_LABELS = {
@@ -50,13 +53,31 @@ class ChatTurn:
         self.thread_id = thread_id
         self.display_messages = display_messages
 
+        # 整轮起止时间（毫秒），供前端展示"用时 12.4s"；结束前 ended_at 保持 None
+        self.started_at = int(time.time() * 1000)
+        self.ended_at: int | None = None
+
         # 当前助手消息累积缓冲
         self.assistant_content = ""
         self.tool_calls: list[dict] = []
+        # 与 content/toolCalls 并行的有序分段：前端按它还原"正文→工具→正文"，
+        # 只存聚合视图会让工具全部堆到正文上方。tool part 直接引用 tool_calls
+        # 里的同一个 dict，参数/结果更新后无需二次同步。
+        self.assistant_parts: list[dict] = []
         # 工具调用之后模型会开一段新文本，两段之间没有分隔符就会连成
         # "……定位零件。✅ 已获取数据" 这种一句话。这里记一笔，续写前补空行。
         self.pending_separator = False
         self.thinking_emitted = False
+
+        # 最终稿在 parts 中的起点：评审要求修订后，由此下标起的 parts 属于最终稿，
+        # 之前的都是过程/草稿。前端据此切分展示，历史消息仍保留全部草稿。
+        self.final_start_index = 0
+        # 第一次修订的起点：多次修订时保持不变，供前端识别「这段回答被修订过」
+        self.first_revision_index: int | None = None
+        # 评审已判定 needs_revision，但还没有等到修订后的首段输出。
+        self._revision_pending = False
+        # 修订稿必须写进新的 text part：否则会续写进草稿段落，切分点失效。
+        self._revision_boundary_pending = False
 
         self.phase = "thinking"
         self.last_phase = "thinking"
@@ -67,6 +88,10 @@ class ChatTurn:
         self._assistant_entry: dict | None = None
         self.assistant_appended = False
         self._last_persist = 0.0
+        # 落库在后台任务里做：token 热路径上 await Mongo 会把 SSE 卡住。
+        # 同一时刻只允许一个写任务，期间的新快照只打 dirty 标记，由该任务补写。
+        self._persist_task: asyncio.Task | None = None
+        self._persist_dirty = False
 
         # 内部调用（review_router 等）一旦确认，后续增量也必须一并丢弃。
         # SDK 序列化后 tags / name / id 都可能只在后续片段才出现，所以参数字节
@@ -88,10 +113,19 @@ class ChatTurn:
                 "role": "assistant",
                 "content": "",
                 "toolCalls": None,
+                "parts": None,
                 "timestamp": datetime.now().isoformat(),
             }
         self._assistant_entry["content"] = self.assistant_content
         self._assistant_entry["toolCalls"] = self.tool_calls or None
+        self._assistant_entry["parts"] = self.assistant_parts or None
+        # 最终稿起点：前端按 parts[finalStartIndex:] 取最终稿，之前视为过程/草稿
+        self._assistant_entry["finalStartIndex"] = self.final_start_index
+        # 首次修订起点：未修订过为 None，前端据此判断有无修订痕迹
+        self._assistant_entry["firstRevisionIndex"] = self.first_revision_index
+        # 每次同步起止时间：流式期间 endedAt 为 None，结束时再写入最终值
+        self._assistant_entry["startedAt"] = self.started_at
+        self._assistant_entry["endedAt"] = self.ended_at
         return self._assistant_entry
 
     def _has_assistant_payload(self) -> bool:
@@ -114,12 +148,89 @@ class ChatTurn:
     async def persist(self) -> None:
         await save_display_messages(self.thread_id, self.snapshot())
 
+    async def _persist_loop(self) -> None:
+        """后台写库：每次写最新快照，写的过程中有新内容就再补一轮。
+
+        ``snapshot()`` 返回的列表/字典仍与主流程共享，必须 deepcopy 后再交出去，
+        否则 await 期间主流程继续追加 token 或改 tool_calls，序列化出的内容会自相矛盾。
+        """
+        try:
+            while True:
+                await save_display_messages(
+                    self.thread_id, copy.deepcopy(self.snapshot())
+                )
+                if not self._persist_dirty:
+                    return
+                self._persist_dirty = False
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # 后台任务没人 await，异常必须自己消化，否则会变成 unhandled task exception
+            web_logger.warning(
+                f"Failed to persist progress for {self.thread_id}: {exc}"
+            )
+
+    def _schedule_persist(self) -> None:
+        """调度一次后台写库；已有任务在跑时只标 dirty，不并发写同一份消息。"""
+        if self._persist_task is not None and not self._persist_task.done():
+            self._persist_dirty = True
+            return
+        self._persist_dirty = False
+        self._persist_task = asyncio.create_task(self._persist_loop())
+
+    async def flush_persist(self) -> None:
+        """等掉在途的后台写，再保存最新快照（结束 / 中断时调用）。"""
+        task = self._persist_task
+        self._persist_task = None
+        self._persist_dirty = False
+        if task is not None:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                # 取消或写失败都不影响最终这次保存；失败原因已在 _persist_loop 记录
+                pass
+        await self.persist()
+
     async def maybe_persist(self, force: bool = False) -> None:
-        """按间隔节流保存：既能看到已写出的内容，又不会每个 token 写一次库。"""
+        """按间隔节流保存：既能看到已写出的内容，又不会每个 token 写一次库。
+
+        只做节流判断和调度，不在这里 await 数据库，避免阻塞 SSE 下发。
+        """
         now = time.monotonic()
         if force or now - self._last_persist >= PERSIST_INTERVAL_SECONDS:
             self._last_persist = now
-            await self.persist()
+            self._schedule_persist()
+
+    def _mark_revision(self) -> list[Event]:
+        """把当前 parts 长度记为最终稿起点，并通知前端切换展示。
+
+        评审要求修订时调用：此前的 parts 是过程/草稿（保留），此后的输出是最终稿。
+        多次修订时 firstRevisionIndex 只记第一次，finalStartIndex 每次更新。
+        """
+        if self.first_revision_index is None:
+            self.first_revision_index = len(self.assistant_parts)
+        self.final_start_index = len(self.assistant_parts)
+        self._revision_pending = False
+        # 下一段正文要另起 part，避免被合并进草稿段落导致切分点对不上
+        self._revision_boundary_pending = True
+        return [("revision", {
+            "finalStartIndex": self.final_start_index,
+            "firstRevisionIndex": self.first_revision_index,
+        })]
+
+    def _append_text_part(self, text: str) -> None:
+        """把一段正文追加到最后一个 text part；中间隔着工具就新起一段。"""
+        if not text:
+            return
+        if (
+            not self._revision_boundary_pending
+            and self.assistant_parts
+            and self.assistant_parts[-1].get("type") == "text"
+        ):
+            self.assistant_parts[-1]["text"] += text
+        else:
+            self.assistant_parts.append({"type": "text", "text": text})
+        self._revision_boundary_pending = False
 
     def append_assistant(self) -> None:
         """把本轮助手消息并入 display_messages（流结束或审批中断时调用一次）。
@@ -133,14 +244,19 @@ class ChatTurn:
 
     async def finish_interrupted(self) -> None:
         """中断结束：先固化消息与 trace，避免待审批轮次在库里是空的。"""
+        # 先记结束时间，再 append：最终快照要带上 endedAt，流式中途的快照仍为 None
+        self.ended_at = int(time.time() * 1000)
         self.append_assistant()
-        await save_display_messages(self.thread_id, self.display_messages)
+        # 后台可能还有一次旧快照在写，先 flush 再落最终版，避免旧快照覆盖新内容
+        await self.flush_persist()
         await save_harness_trace(self.thread_id, self.harness_trace)
 
     async def finish_completed(self, user_id: str, message: str = "") -> None:
         """正常结束：固化消息 + trace，并给首条消息补一个会话标题。"""
+        # 先记结束时间，再 append：最终快照要带上 endedAt，流式中途的快照仍为 None
+        self.ended_at = int(time.time() * 1000)
         self.append_assistant()
-        await save_display_messages(self.thread_id, self.display_messages)
+        await self.flush_persist()
         await save_harness_trace(self.thread_id, self.harness_trace)
         if message:
             await save_conversation(
@@ -231,6 +347,9 @@ class ChatTurn:
                 self.last_phase = "reviewing"
                 events.append(("phase", {"phase": "reviewing", "label": "审查中"}))
         elif event_type == "rubric_evaluation_end":
+            # 评审未通过、将打回重做：这里只置标记，等修订稿真正开始时再定起点
+            if chunk.get("result") == "needs_revision":
+                self._revision_pending = True
             review_data = {
                 "verdict": chunk.get("result", ""),
                 "explanation": chunk.get("explanation", ""),
@@ -262,6 +381,16 @@ class ChatTurn:
         content = message_field(token, "content", "")
         tool_call_chunks = message_field(token, "tool_call_chunks", None)
         message_id = message_field(token, "id", "") or ""
+        # 名称 / 附加参数后面多处要用，先取出来复用
+        source_name = message_field(token, "name")
+        extra = message_field(token, "additional_kwargs", {}) or {}
+
+        # rubric_grader 注入的 human 消息 = 评审要求修订：从这一刻起后面的输出是最终稿
+        if token_type == "human" and (
+            source_name == "rubric_grader"
+            or (isinstance(extra, dict) and extra.get("lc_source") == "rubric_grader")
+        ):
+            return self._mark_revision()
 
         # 换了一条 AI 消息：上一条消息的工具缓冲随之失效。
         # （msg id 缺失的片段沿用当前消息；工具结果要复用缓冲，不能清）
@@ -289,6 +418,9 @@ class ChatTurn:
 
         # AIMessage with tool_call_chunks → tool_start / tool_args
         if tool_call_chunks:
+            # 修订稿以工具调用开头：先标记最终稿起点，再追加工具 part
+            if self._revision_pending:
+                events.extend(self._mark_revision())
             for call in tool_call_chunks:
                 call_name = message_field(call, "name") or ""
                 call_args = message_field(call, "args") or ""
@@ -334,13 +466,21 @@ class ChatTurn:
         # AIMessage 纯文本 → token 事件
         # 只把模型（AI）的文本当作回答；跳过 Human/System 注入消息
         # （例如 rubric 评审器注入的英文修订反馈，绝不能展示给用户）。
-        source_name = message_field(token, "name")
-        extra = message_field(token, "additional_kwargs", {}) or {}
         is_internal = (
             source_name == "rubric_grader"
-            or extra.get("lc_source") == "rubric_grader"
+            or (isinstance(extra, dict) and extra.get("lc_source") == "rubric_grader")
         )
         is_ai_text = token_type in ("ai", "AIMessageChunk")
+
+        # DeepSeek 把思考过程单独放在 additional_kwargs.reasoning_content 里，
+        # 与正文是两路数据。这里单发 reasoning 事件，不并入 assistant_content，
+        # 也不参与落库：思考过程不该出现在历史消息里，更不该混进正文。
+        reasoning = extra.get("reasoning_content") if isinstance(extra, dict) else None
+        if is_ai_text and not is_internal and isinstance(reasoning, str) and reasoning:
+            events.append((
+                "reasoning",
+                {"content": reasoning, "source": source_label(namespace)},
+            ))
 
         # 纯空白分片必须原样透传：流式输出时 "\n\n" 经常单独成一个 chunk，
         # 过滤掉会导致标题粘连正文、列表项挤成一行、表格贴着上一段。
@@ -350,6 +490,9 @@ class ChatTurn:
             and isinstance(content, str)
             and content != ""
         ):
+            # 修订稿的第一段正文：先标记最终稿起点，再写正文
+            if self._revision_pending:
+                events.extend(self._mark_revision())
             # 可见文本意味着上一组工具调用已经结束，旧调用的兜底指针失效
             self._last_call_key = None
             # 只有出现可见字符才结束 thinking，纯换行不应让"思考中"提前消失
@@ -362,6 +505,8 @@ class ChatTurn:
                     content = "\n\n" + content
                 self.pending_separator = False
             self.assistant_content += content
+            # 历史消息也要能还原正文与工具的交错顺序，不能只存聚合的 content
+            self._append_text_part(content)
             events.append(("token", {"content": content, "source": source_label(namespace)}))
             # 生成过程中按间隔落库，断流后仍能看到已经写出的内容
             await self.maybe_persist()
@@ -426,7 +571,11 @@ class ChatTurn:
             "name": buffer["name"],
             "args": "",
             "status": "running",
+            "startedAt": int(time.time() * 1000),
         })
+        # 工具在消息里的真实位置靠 parts 保留；call 引用同一个 dict，
+        # 后续 args/result/status 更新会自动反映到 parts 里。
+        self.assistant_parts.append({"type": "tool", "call": self.tool_calls[-1]})
         buffer["tool_index"] = len(self.tool_calls) - 1
         buffer["emitted"] = True
         events.append(("tool_start", {
@@ -508,6 +657,7 @@ class ChatTurn:
         if target is not None:
             target["result"] = tool_content[:TOOL_RESULT_LIMIT]
             target["status"] = "done"
+            target["endedAt"] = int(time.time() * 1000)
 
         # TODO 类工具额外推一次任务列表更新
         if "todo" in tool_name.lower() or "task" in tool_name.lower():

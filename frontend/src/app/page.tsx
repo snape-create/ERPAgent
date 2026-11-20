@@ -19,22 +19,32 @@ function toChatMessages(raw: RawMsg[]): ChatMessage[] {
     role: (m.role as "user" | "assistant") || "assistant",
     content: (m.content as string) || "",
     source: m.source as string | undefined,
-    toolCalls: m.toolCalls as ChatMessage["toolCalls"],
+    toolCalls: (m.toolCalls as ChatMessage["toolCalls"]) ?? undefined,
+    // 分段顺序只存在于后端返回的 parts 里，丢掉它正文和工具的交错关系就没了。
+    // Mongo 里空值可能是 null，这里统一收敛成 undefined。
+    parts: (m.parts as ChatMessage["parts"]) ?? undefined,
     timestamp: (m.timestamp as number) || Date.now(),
+    startedAt: (m.startedAt as number) || undefined,
+    endedAt: (m.endedAt as number) || undefined,
+    finalStartIndex: (m.finalStartIndex as number) ?? undefined,
+    firstRevisionIndex: (m.firstRevisionIndex as number) ?? undefined,
   }));
 }
 
 /** 内容签名：SWR 后台校验时，数据没变就不触发重新渲染 */
 function signature(msgs: ChatMessage[]): string {
   return msgs
-    .map((m) => `${m.role}:${m.content.length}:${(m.toolCalls ?? []).length}`)
+    .map(
+      (m) =>
+        `${m.role}:${m.content.length}:${(m.toolCalls ?? []).length}:${(m.parts ?? []).length}:${m.startedAt ?? 0}:${m.endedAt ?? 0}:${m.finalStartIndex ?? 0}:${m.firstRevisionIndex ?? 0}`
+    )
     .join("|");
 }
 
 export default function Home() {
   const chat = useChat();
   const history = useHistory();
-  const wasStreaming = useRef(false);
+  const lastFinalizedRef = useRef(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // 已加载会话的线程缓存：切回历史会话时零请求瞬时显示，
@@ -73,16 +83,15 @@ export default function Home() {
   // 否则会导致 effect 每次渲染重复执行、疯狂请求 /api/history）。
   const refreshHistory = history.refresh;
   useEffect(() => {
-    if (wasStreaming.current && !chat.streaming) {
-      wasStreaming.current = false;
-      // 这一轮刚落库，旧线程缓存已过时：下次切回时强制走网络拿新回答
-      threadCacheRef.current.delete(chat.threadId);
-      // 延迟 500ms 等待后端保存完成
-      const timer = setTimeout(() => refreshHistory(), 500);
-      return () => clearTimeout(timer);
-    }
-    wasStreaming.current = chat.streaming;
-  }, [chat.streaming, chat.threadId, refreshHistory]);
+    // finalizedAt 在 HTTP 流关闭后才更新；done 只代表不再有新事件，
+    // 后端可能还在写 trace/会话标题，过早刷新会拿到旧数据。
+    if (!chat.finalizedAt || chat.finalizedAt === lastFinalizedRef.current) return;
+    lastFinalizedRef.current = chat.finalizedAt;
+    // 这一轮刚落库，旧线程缓存已过时：下次切回时强制走网络拿新回答
+    threadCacheRef.current.delete(chat.threadId);
+    const timer = setTimeout(() => refreshHistory(), 100);
+    return () => clearTimeout(timer);
+  }, [chat.finalizedAt, chat.threadId, refreshHistory]);
 
   // 后台静默校验已展示的会话：有新内容才替换，无变化不触发重渲染
   const revalidate = useCallback(
@@ -203,7 +212,6 @@ export default function Home() {
       <ChatArea
         messages={chat.messages}
         streaming={chat.streaming}
-        thinking={chat.thinking}
         interrupted={chat.interrupted}
         interruptData={chat.interruptData}
         todoItems={chat.todoItems}
@@ -211,6 +219,8 @@ export default function Home() {
         pendingQueue={chat.pendingQueue}
         phase={chat.phase}
         phaseLabel={chat.phaseLabel}
+        activityLabel={chat.activityLabel}
+        lastEventAt={chat.lastEventAt}
         error={chat.error}
         onDismissError={chat.dismissError}
         onOpenSidebar={() => setSidebarOpen(true)}

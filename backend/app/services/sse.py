@@ -11,9 +11,9 @@ from fastapi.responses import StreamingResponse
 # 流式过程中保存进度的最小间隔（秒）；断流时还会额外做一次兜底保存
 PERSIST_INTERVAL_SECONDS = 1.5
 
-# 关闭代理/网关缓冲，保证逐字下发
+# 关闭代理/网关缓冲，保证逐字下发；no-transform 同时禁止中间层压缩/转码
 SSE_HEADERS = {
-    "Cache-Control": "no-cache",
+    "Cache-Control": "no-cache, no-transform",
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
 }

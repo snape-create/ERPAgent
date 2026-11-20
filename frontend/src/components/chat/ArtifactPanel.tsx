@@ -24,6 +24,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { ArtifactKind, ChatArtifact } from "@/lib/artifacts";
+import { isTextArtifact, viewerHref, withDownloadFlag } from "@/lib/artifact-links";
 import Markdown from "./Markdown";
 
 interface Props {
@@ -58,13 +59,27 @@ const TEXT_KINDS: ReadonlySet<ArtifactKind> = new Set([
 const ACTION_CLASS =
   "h-6 px-1.5 flex items-center gap-1 rounded-[4px] text-[11.5px] text-ink-2 hover:bg-raised transition-colors duration-150 ease-quiet";
 
-function isTextual(kind: ArtifactKind): boolean {
-  return TEXT_KINDS.has(kind);
+/**
+ * “新标签打开”去哪：
+ * - 文本类产物走前端 /view，渲染 Markdown/表格/文本，而不是把 .md 原文甩给浏览器；
+ * - PDF/图片/其它文件直接打开原始地址；
+ * - HTML 不在同源新标签执行，只允许走带 sandbox 的 iframe 预览。
+ */
+function newTabHref(artifact: ChatArtifact): string | null {
+  if (artifact.kind === "html") return null;
+  if (isTextArtifact(artifact.href)) return viewerHref(artifact.href);
+  if (
+    artifact.kind === "pdf" ||
+    artifact.kind === "image" ||
+    artifact.kind === "other"
+  ) {
+    return artifact.href;
+  }
+  return null;
 }
 
-/** 让 gateway 明确返回 attachment，避免 HTML 在浏览器里被 inline 执行。 */
-function withDownloadFlag(href: string): string {
-  return `${href}${href.includes("?") ? "&" : "?"}download=1`;
+function isTextual(kind: ArtifactKind): boolean {
+  return TEXT_KINDS.has(kind);
 }
 
 /* ===== 预览弹窗 ===== */
@@ -192,6 +207,7 @@ function PreviewModal({
 }) {
   const meta = KIND_META[artifact.kind];
   const Icon = meta.Icon;
+  const newTab = newTabHref(artifact);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -224,9 +240,9 @@ function PreviewModal({
             </span>
           </div>
           <div className="ml-4 flex shrink-0 items-center gap-1">
-            {artifact.kind !== "html" && (
+            {newTab && (
               <a
-                href={artifact.href}
+                href={newTab}
                 target="_blank"
                 rel="noopener noreferrer"
                 className={ACTION_CLASS}
@@ -272,7 +288,7 @@ function ArtifactRow({
   const canPreview = artifact.kind !== "other";
   // HTML 只允许在带 sandbox 的 iframe 里预览，不在同源新标签直接执行；
   // 下载走 download 属性，避免生成的脚本拿到前端页面的 origin。
-  const canOpenExternal = artifact.kind === "pdf" || artifact.kind === "other";
+  const newTab = newTabHref(artifact);
 
   return (
     <li className="flex flex-wrap items-center gap-x-2 gap-y-1 px-2.5 py-2">
@@ -306,9 +322,9 @@ function ArtifactRow({
           <Download size={12} strokeWidth={1.5} />
           下载
         </a>
-        {canOpenExternal && (
+        {newTab && (
           <a
-            href={artifact.href}
+            href={newTab}
             target="_blank"
             rel="noopener noreferrer"
             className={ACTION_CLASS}

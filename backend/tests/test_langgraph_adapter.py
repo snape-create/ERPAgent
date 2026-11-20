@@ -204,10 +204,59 @@ class ChatTurnDictStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot[0]["content"], "")
         self.assertEqual(snapshot[0]["toolCalls"][0]["name"], "download_sandbox_file")
         self.assertIn("/api/download/report.html", snapshot[0]["toolCalls"][0]["result"])
+        # 有序分段也要落库：刷新后正文与工具的交错关系不能丢
+        self.assertEqual(snapshot[0]["parts"][0]["type"], "tool")
+        self.assertEqual(
+            snapshot[0]["parts"][0]["call"]["name"], "download_sandbox_file"
+        )
+        self.assertEqual(snapshot[0]["parts"][0]["call"]["status"], "done")
 
         turn.append_assistant()
         self.assertEqual(len(turn.display_messages), 1)
         self.assertEqual(turn.display_messages[0]["toolCalls"][0]["name"], "download_sandbox_file")
+
+    async def test_finish_completed_records_turn_timing(self):
+        """结束时把整轮起止时间写进落库的助手消息，供前端展示用时。"""
+        turn = self.turn()
+        await turn.handle_message(
+            [], [{"type": "ai", "content": "库存充足"}, {"tags": []}]
+        )
+
+        with patch.object(chat_turn, "save_harness_trace", AsyncMock()), patch.object(
+            chat_turn, "save_conversation", AsyncMock()
+        ):
+            await turn.finish_completed("user-1", "测试")
+
+        entry = turn.display_messages[-1]
+        self.assertIsInstance(entry["startedAt"], int)
+        self.assertGreater(entry["startedAt"], 0)
+        self.assertIsInstance(entry["endedAt"], int)
+        self.assertGreaterEqual(entry["endedAt"], entry["startedAt"])
+
+    async def test_reasoning_content_emitted_separately_from_token(self):
+        """思考过程走独立 reasoning 事件，不混进正文，也不触发 thinking end。"""
+        turn = self.turn()
+        message = {
+            "type": "ai",
+            "content": "",
+            "additional_kwargs": {"reasoning_content": "先查库存再判断"},
+        }
+        events = await turn.handle_message([], [message, {"tags": []}])
+
+        reasoning = [data for name, data in events if name == "reasoning"]
+        self.assertEqual(
+            reasoning, [{"content": "先查库存再判断", "source": "main"}]
+        )
+        self.assertEqual(turn.assistant_content, "")
+
+        # 正文到达后，思考文本不得混入 token
+        text_events = await turn.handle_message(
+            [], [{"type": "ai", "content": "库存充足"}, {"tags": []}]
+        )
+        self.assertEqual([data for name, data in text_events if name == "reasoning"], [])
+        tokens = [data for name, data in text_events if name == "token"]
+        self.assertEqual(tokens, [{"content": "库存充足", "source": "main"}])
+        self.assertEqual(turn.assistant_content, "库存充足")
 
     async def test_review_router_tags_filtered(self):
         turn = self.turn()
@@ -400,6 +449,110 @@ class ChatTurnDictStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([name for name, _ in text], ["token"])
         self.assertEqual(text[0][1]["content"], "库存充足")
         self.assertEqual([call["name"] for call in turn.tool_calls], ["query_stock"])
+
+    async def test_revision_marks_final_start_index(self):
+        """评审要求修订：revision 事件标出最终稿起点，草稿仍保留在 parts 里。"""
+        turn = self.turn()
+        await turn.handle_message(
+            [], [{"type": "ai", "content": "初稿"}, {"tags": []}]
+        )
+        self.assertEqual(len(turn.assistant_parts), 1)
+
+        events = await turn.handle_message(
+            [],
+            [
+                {"type": "human", "name": "rubric_grader", "content": "revise"},
+                {"tags": []},
+            ],
+        )
+        self.assertEqual([name for name, _ in events], ["revision"])
+        self.assertEqual(
+            events[0][1]["finalStartIndex"], len(turn.assistant_parts)
+        )
+        self.assertEqual(events[0][1]["firstRevisionIndex"], 1)
+
+        await turn.handle_message(
+            [], [{"type": "ai", "content": "终稿"}, {"tags": []}]
+        )
+
+        entry = turn.snapshot()[-1]
+        self.assertEqual(entry["finalStartIndex"], 1)
+        self.assertEqual(entry["firstRevisionIndex"], 1)
+        # 草稿与终稿都要保留，前端按 finalStartIndex 切分
+        self.assertEqual(
+            [part["text"] for part in entry["parts"]], ["初稿", "终稿"]
+        )
+        self.assertEqual(
+            entry["parts"][entry["finalStartIndex"]:],
+            [{"type": "text", "text": "终稿"}],
+        )
+
+    async def test_second_revision_keeps_first_revision_index(self):
+        """多次修订：firstRevisionIndex 记第一次，finalStartIndex 跟到最后一次。"""
+        turn = self.turn()
+        await turn.handle_message(
+            [], [{"type": "ai", "content": "初稿"}, {"tags": []}]
+        )
+        first = await turn.handle_message(
+            [],
+            [
+                {"type": "human", "name": "rubric_grader", "content": "revise"},
+                {"tags": []},
+            ],
+        )
+        self.assertEqual(
+            first[0][1], {"finalStartIndex": 1, "firstRevisionIndex": 1}
+        )
+
+        await turn.handle_message(
+            [], [{"type": "ai", "content": "修订稿一"}, {"tags": []}]
+        )
+        second = await turn.handle_message(
+            [],
+            [
+                {"type": "human", "name": "rubric_grader", "content": "revise again"},
+                {"tags": []},
+            ],
+        )
+        self.assertEqual(
+            second[0][1], {"finalStartIndex": 2, "firstRevisionIndex": 1}
+        )
+
+        await turn.handle_message(
+            [], [{"type": "ai", "content": "修订稿二"}, {"tags": []}]
+        )
+
+        entry = turn.snapshot()[-1]
+        self.assertEqual(entry["firstRevisionIndex"], 1)
+        self.assertEqual(entry["finalStartIndex"], 2)
+        self.assertEqual(
+            [part["text"] for part in entry["parts"]],
+            ["初稿", "修订稿一", "修订稿二"],
+        )
+        self.assertEqual(
+            entry["parts"][entry["finalStartIndex"]:],
+            [{"type": "text", "text": "修订稿二"}],
+        )
+
+    async def test_revision_pending_fallback(self):
+        """没有 grader human 消息时，needs_revision 标记在修订稿首段前兑现。"""
+        turn = self.turn()
+        await turn.handle_custom(
+            {
+                "type": "rubric_evaluation_end",
+                "result": "needs_revision",
+                "explanation": "missing evidence",
+                "criteria": [],
+                "iteration": 1,
+            }
+        )
+        events = await turn.handle_message(
+            [], [{"type": "ai", "content": "修订稿"}, {"tags": []}]
+        )
+        names = [name for name, _ in events]
+        self.assertIn("revision", names)
+        self.assertLess(names.index("revision"), names.index("token"))
+        self.assertEqual(turn.assistant_content, "修订稿")
 
     async def test_interrupt_value_wrapper_restores_card(self):
         turn = self.turn()

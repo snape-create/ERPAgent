@@ -12,7 +12,12 @@ from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
-from erpflow.middlewares.review_gate import ReviewExecutionGate, SafeRubricMiddleware
+from erpflow.config import MAX_TOOL_CALLS
+from erpflow.middlewares.review_gate import (
+    ReviewExecutionGate,
+    SafeRubricMiddleware,
+    execution_signals,
+)
 from erpflow.review import HarnessPhaseMiddleware, ReviewPolicy, ReviewRoute, load_harness_config
 
 
@@ -195,6 +200,35 @@ class HybridReviewTests(unittest.TestCase):
         state = {**self.state("hello"), "_review_start": 0}
         state["messages"].append(ToolMessage(content="Error: offline", tool_call_id="err"))
         self.assertNotIn("rubric", ReviewExecutionGate(self.config).after_agent(state, None))
+
+    def test_tool_budget_exhausted_signal(self):
+        """工具被限额拦截，或工具消息数达到上限，都要标记额度耗尽。"""
+        state = {**self.state("hello"), "_review_start": 0}
+        state["messages"].append(
+            ToolMessage(content="Tool call limit exceeded: 30/30", tool_call_id="limit")
+        )
+        signals, _ = execution_signals(state)
+        self.assertIn("tool_budget_exhausted", signals)
+
+        many = {**self.state("hello"), "_review_start": 0}
+        many["messages"].extend(
+            ToolMessage(content="ok", tool_call_id=f"c{i}") for i in range(MAX_TOOL_CALLS)
+        )
+        signals, _ = execution_signals(many)
+        self.assertIn("tool_budget_exhausted", signals)
+
+    def test_gate_skips_review_when_budget_exhausted(self):
+        """额度耗尽时直接 skip，不再升级 rubric 复审。"""
+        state = {**self.state("分析报价"), "_review_start": 0}
+        state["messages"].append(
+            ToolMessage(content="Tool call limit exceeded", tool_call_id="limit")
+        )
+        update = ReviewExecutionGate(self.config).after_agent(state, None)
+        self.assertTrue(update["_review_budget_exhausted"])
+        self.assertNotIn("rubric", update)
+        self.assertEqual(update["review_decision"]["decision"], "skip")
+        self.assertEqual(update["review_decision"]["source"], "tool_budget")
+        self.assertEqual(update["review_decision"]["reason"], "工具额度已用尽，停止复审")
 
 
 if __name__ == "__main__":

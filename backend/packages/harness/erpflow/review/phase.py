@@ -61,6 +61,8 @@ class HarnessPhaseState(RubricState):
     review_decision: NotRequired[dict[str, Any]]
     _review_start: NotRequired[Annotated[int, PrivateStateAttr]]
     _review_write_attempted: NotRequired[Annotated[bool, PrivateStateAttr]]
+    _review_budget_exhausted: NotRequired[Annotated[bool, PrivateStateAttr]]
+    """工具额度已耗尽：本轮跳过复审，避免要求补证却无工具可用。"""
     _review_signals: NotRequired[Annotated[list[str], PrivateStateAttr]]
     _human_approved: NotRequired[Annotated[bool, PrivateStateAttr]]
     """本次请求是否由 HITL resume 人工批准（用于给评审器提供可信的审批上下文）。"""
