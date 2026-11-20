@@ -9,6 +9,7 @@ import InputBar from "./InputBar";
 import ThinkingIndicator from "./ThinkingIndicator";
 import TodoListPanel from "./TodoListPanel";
 import HarnessPhaseBar from "./HarnessPhaseBar";
+import LiveActivity, { hasRunningToolCall } from "./LiveActivity";
 import InterruptBanner from "@/components/interrupt/InterruptBanner";
 
 interface Props {
@@ -54,6 +55,8 @@ export default function ChatArea({
 }: Props) {
   const [showToolCalls, setShowToolCalls] = useState(true);
   const hasMessages = messages.length > 0;
+  // 有工具在跑时由 LiveActivity 负责运行反馈，避免和"正在思考"重复
+  const liveActive = streaming && hasRunningToolCall(messages);
 
   return (
     <main className="flex-1 flex flex-col min-h-0 min-w-0 bg-paper">
@@ -94,6 +97,9 @@ export default function ChatArea({
         visible={streaming || phase === "done" || interrupted}
       />
 
+      {/* 工具执行中的持续运行状态（含已用时） */}
+      <LiveActivity messages={messages} streaming={streaming} />
+
       {/* 消息区域 / 欢迎页 */}
       {hasMessages ? (
         <MessageList
@@ -106,7 +112,7 @@ export default function ChatArea({
       )}
 
       {/* 深度思考状态 */}
-      {thinking && <ThinkingIndicator visible={thinking} />}
+      {thinking && !liveActive && <ThinkingIndicator visible={thinking} />}
 
       {/* 中断交互区：即使 interruptData 缺失也要渲染兜底，避免静默空白 */}
       {interrupted && (

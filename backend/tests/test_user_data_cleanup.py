@@ -106,3 +106,37 @@ def test_removes_empty_subdirectories(tmp_path, monkeypatch):
 
     assert removed == 1
     assert not nested.exists()
+
+def test_skips_active_user_by_lease(tmp_path, monkeypatch):
+    uploads, _ = _make_user(tmp_path, monkeypatch)
+    old = uploads / "old.txt"
+    old.write_text("old", encoding="utf-8")
+    _age(old)
+
+    removed = user_data_cleanup.cleanup_expired_user_data(
+        active_user_ids={"alice"},
+        uploads_ttl_days=30,
+        outputs_ttl_days=30,
+    )
+
+    assert removed == 0
+    assert old.exists()
+
+
+def test_stale_running_container_does_not_block_ttl_without_lease(tmp_path, monkeypatch):
+    uploads, _ = _make_user(tmp_path, monkeypatch)
+    old = uploads / "old.txt"
+    old.write_text("old", encoding="utf-8")
+    _age(old)
+
+    # 模拟进程重启后 Docker 里仍有 running 的 cached 用户容器，但当前进程
+    # 没有任何活跃 lease；这时不应再被容器名永久阻塞。
+    removed = user_data_cleanup.cleanup_expired_user_data(
+        active_user_ids=set(),
+        active_container_names=["erp-sandbox-alice-abc123"],
+        uploads_ttl_days=30,
+        outputs_ttl_days=30,
+    )
+
+    assert removed == 1
+    assert not old.exists()

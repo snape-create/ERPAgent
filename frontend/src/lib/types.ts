@@ -111,6 +111,8 @@ export interface ToolCallInfo {
   args: string;
   result?: string;
   status: "running" | "done" | "error";
+  /** 工具开始执行的时间戳；旧历史消息没有该字段 */
+  startedAt?: number;
 }
 
 export interface ChatMessage {

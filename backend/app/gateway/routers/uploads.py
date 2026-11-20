@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import asyncio
+import threading
 import uuid
 from pathlib import Path
 
@@ -24,10 +26,29 @@ MAX_UPLOAD_BYTES = SANDBOX_MAX_UPLOAD_MB * 1024 * 1024
 MAX_USER_UPLOAD_BYTES = SANDBOX_MAX_USER_UPLOAD_MB * 1024 * 1024
 _CHUNK_SIZE = 1024 * 1024
 
+# 配额检查和最终 rename 必须在同一用户锁内完成，否则两个并发上传会同时
+# 读到旧 usage，双双通过上限检查。
+#
+# asyncio.Lock 会绑定到首次使用的 event loop；TestClient 可能为每组请求创建
+# 不同的 loop，复用同一个 Lock 会卡死。因此 key 带上 loop identity。
+_user_locks: dict[tuple[int, str], asyncio.Lock] = {}
+_user_locks_guard = threading.Lock()
+
+
+def _lock_for(user_id: str) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    key = (id(loop), user_id)
+    with _user_locks_guard:
+        return _user_locks.setdefault(key, asyncio.Lock())
+
 
 def _unique_target(base: Path, filename: str) -> Path:
     """避免同名覆盖；文件名已通过 safe_filename 校验。"""
     name = safe_filename(filename)
+    # .part 是服务端临时文件后缀；用户不能把它当最终文件名，否则
+    # _current_usage/list_uploads 都会忽略它，从而绕过配额和列表。
+    if name.lower().endswith(".part"):
+        raise UnsafePathError("文件名不能以 .part 结尾")
     target = base / name
     if not target.exists():
         return target
@@ -100,23 +121,25 @@ async def upload_files(
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id 不能为空")
 
-    ensure_user_data_dirs(user_id)
-    base = uploads_dir(user_id)
-    base.mkdir(parents=True, exist_ok=True)
+    lock = _lock_for(user_id)
+    async with lock:
+        ensure_user_data_dirs(user_id)
+        base = uploads_dir(user_id)
+        base.mkdir(parents=True, exist_ok=True)
 
-    saved = []
-    usage = _current_usage(base)
-    for upload in files:
-        try:
-            target = _unique_target(base, upload.filename or "")
-            size = await _save_upload(upload, target, usage_start=usage)
-        except UnsafePathError as exc:
-            raise HTTPException(status_code=400, detail=f"文件名非法: {exc}") from exc
-        usage += size
-        saved.append({"filename": target.name, "size": size})
+        saved = []
+        usage = _current_usage(base)
+        for upload in files:
+            try:
+                target = _unique_target(base, upload.filename or "")
+                size = await _save_upload(upload, target, usage_start=usage)
+            except UnsafePathError as exc:
+                raise HTTPException(status_code=400, detail=f"文件名非法: {exc}") from exc
+            usage += size
+            saved.append({"filename": target.name, "size": size})
 
     web_logger.info(f"Uploaded {len(saved)} file(s) for user {user_id}")
-    return {"user_id": user_id, "files": saved, "uploads_dir": str(base)}
+    return {"user_id": user_id, "files": saved}
 
 
 @router.get("")

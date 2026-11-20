@@ -242,8 +242,9 @@ def _write_to_sandbox_or_local(filename: str, content: str, title: str, format_n
                 f"文件大小: {file_size / 1024:.1f} KB\n"
                 f"沙箱路径: {sandbox_path}\n"
                 f"\n"
-                f"💡 如需下载到本地，请使用 download_sandbox_file 工具，"
-                f"传入沙箱路径: {sandbox_path}"
+                f"下一步必须调用 download_sandbox_file 工具，传入沙箱路径: "
+                f"{sandbox_path}；拿到 HTTP 下载链接后再面向用户回复。"
+                f"不要把沙箱路径当作下载链接，也不要在没有导出链接时声称文件可下载。"
             )
         except Exception as e:
             agent_logger.warning(f"Sandbox write failed ({e}), falling back to local")

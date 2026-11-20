@@ -84,6 +84,8 @@ class SandboxEntry:
         self.claimed_at: datetime | None = None
         self.last_active_at = datetime.now()
         self.active_runs = 0
+        # 最近一次 acquire/release 的时间；用于识别 HITL/断流后未释放的孤儿租约。
+        self.lease_last_updated: datetime | None = None
 
     def touch(self) -> None:
         """更新活跃时间。"""
@@ -112,4 +114,9 @@ class SandboxEntry:
             "claimed_at": self.claimed_at.isoformat() if self.claimed_at else None,
             "last_active_at": self.last_active_at.isoformat(),
             "active_runs": self.active_runs,
+            "lease_last_updated": (
+                self.lease_last_updated.isoformat()
+                if self.lease_last_updated
+                else None
+            ),
         }

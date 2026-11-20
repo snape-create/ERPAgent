@@ -94,10 +94,20 @@ class ChatTurn:
         self._assistant_entry["toolCalls"] = self.tool_calls or None
         return self._assistant_entry
 
+    def _has_assistant_payload(self) -> bool:
+        """本轮是否产生了需要持久化的助手内容。
+
+        不能只看 assistant_content：模型可能先调用 generate_document /
+        download_sandbox_file 等工具，随后没有输出正文（或客户端断流）。
+        如果此时丢弃 tool_calls，历史里就只剩用户消息，前端也无法再展示
+        工具结果里的产物链接。
+        """
+        return bool(self.assistant_content or self.tool_calls)
+
     def snapshot(self) -> list:
         """当前进度的完整快照（含尚未写完的助手消息）。"""
         entries = list(self.display_messages)
-        if self.assistant_content and not self.assistant_appended:
+        if self._has_assistant_payload() and not self.assistant_appended:
             entries.append(dict(self._entry()))
         return entries
 
@@ -112,8 +122,12 @@ class ChatTurn:
             await self.persist()
 
     def append_assistant(self) -> None:
-        """把本轮助手消息并入 display_messages（流结束或审批中断时调用一次）。"""
-        if self.assistant_content and not self.assistant_appended:
+        """把本轮助手消息并入 display_messages（流结束或审批中断时调用一次）。
+
+        纯工具轮次（有 tool_calls、无正文）也要落库，否则 HTML/图表等
+        产物链接只存在于 SSE 流里，刷新页面后整个助手消息都会消失。
+        """
+        if self._has_assistant_payload() and not self.assistant_appended:
             self.display_messages.append(self._entry())
             self.assistant_appended = True
 

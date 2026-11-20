@@ -102,3 +102,16 @@ def test_user_quota_rejected(client, monkeypatch):
     )
     assert second.status_code == 413
     assert "用户上传空间" in second.text
+
+
+def test_part_filename_rejected(client):
+    """用户不能用 .part 作为最终文件名绕过配额/列表过滤。"""
+    http, tmp_path = client
+    res = http.post(
+        "/api/uploads",
+        data={"user_id": "alice"},
+        files=[("files", ("hidden.part", b"x", "application/octet-stream"))],
+    )
+    assert res.status_code == 400
+    assert ".part" in res.text
+    assert not (tmp_path / "users" / user_data.user_data_dir_name("alice") / "user-data" / "uploads" / "hidden.part").exists()

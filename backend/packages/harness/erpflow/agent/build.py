@@ -86,6 +86,8 @@ def create_main_agent(
     user_context: ProcurementContext | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
     store: BaseStore | None = None,
+    *,
+    enable_sandbox: bool = True,
 ):
     """
     创建主 Agent 实例
@@ -102,6 +104,7 @@ def create_main_agent(
         user_context: 用户上下文（含偏好）
         checkpointer: LangGraph checkpointer（会话持久化）
         store: LangGraph store（跨会话存储）
+        enable_sandbox: 是否领取/创建用户沙箱。state 读取等非执行路径应传 False。
 
     Returns:
         CompiledStateGraph - 可执行的 Agent 图
@@ -121,43 +124,52 @@ def create_main_agent(
     managed_sandbox = False
     claimed_sandbox = False
     manager_for_cleanup = None
-    try:
-        from ..backends.sandbox_holder import set_sandbox
-        from ..backends.sandbox_manager import sandbox_manager
-        from ..backends.sandbox_proxy import SandboxBackendProxy
+    if enable_sandbox:
+        try:
+            from ..backends.sandbox_holder import set_sandbox
+            from ..backends.sandbox_manager import sandbox_manager
+            from ..backends.sandbox_proxy import SandboxBackendProxy
 
-        manager_for_cleanup = sandbox_manager
-        raw_sandbox = sandbox_manager.get_sandbox(user_context.user_id)
-        claimed_sandbox = True
-        sandbox_backend = SandboxBackendProxy(raw_sandbox)
-        bootstrap_sandbox(sandbox_backend)
-        sandbox_manager_instance = sandbox_manager
-        managed_sandbox = True
-        # 注册的是稳定 Proxy，而不是会在重建后失效的原始 Docker 连接。
-        set_sandbox(sandbox_backend, user_context.user_id)
-        agent_logger.info(
-            f"Using managed Docker sandbox for {user_context.user_id}: "
-            f"{sandbox_backend.container_name}"
-        )
-    except Exception as e:
-        # bootstrap / 注册失败时，刚领取的容器不能留在缓存里变孤儿。
-        if claimed_sandbox and manager_for_cleanup is not None:
-            try:
-                manager_for_cleanup.destroy_user_sandbox(user_context.user_id)
-                agent_logger.info(
-                    f"Destroyed unusable claimed sandbox for {user_context.user_id}"
-                )
-            except Exception as cleanup_error:
-                agent_logger.warning(
-                    f"Failed to clean up claimed sandbox for "
-                    f"{user_context.user_id}: {cleanup_error}"
-                )
-        agent_logger.warning(
-            f"Managed Docker sandbox unavailable ({e}), falling back to LocalShell"
-        )
+            manager_for_cleanup = sandbox_manager
+            raw_sandbox = sandbox_manager.get_sandbox(user_context.user_id)
+            claimed_sandbox = True
+            sandbox_backend = SandboxBackendProxy(raw_sandbox)
+            bootstrap_sandbox(sandbox_backend)
+            sandbox_manager_instance = sandbox_manager
+            managed_sandbox = True
+            # 注册的是稳定 Proxy，而不是会在重建后失效的原始 Docker 连接。
+            set_sandbox(sandbox_backend, user_context.user_id)
+            agent_logger.info(
+                f"Using managed Docker sandbox for {user_context.user_id}: "
+                f"{sandbox_backend.container_name}"
+            )
+        except Exception as e:
+            # bootstrap / 注册失败时，刚领取的容器不能留在缓存里变孤儿。
+            if claimed_sandbox and manager_for_cleanup is not None:
+                try:
+                    manager_for_cleanup.destroy_user_sandbox(user_context.user_id)
+                    agent_logger.info(
+                        f"Destroyed unusable claimed sandbox for {user_context.user_id}"
+                    )
+                except Exception as cleanup_error:
+                    agent_logger.warning(
+                        f"Failed to clean up claimed sandbox for "
+                        f"{user_context.user_id}: {cleanup_error}"
+                    )
+            agent_logger.warning(
+                f"Managed Docker sandbox unavailable ({e}), falling back to LocalShell"
+            )
+            sandbox_backend = LocalShellBackend(virtual_mode=True)
+            from ..backends.sandbox_holder import set_sandbox
+            set_sandbox(None, user_context.user_id)
+    else:
+        # state 读取等非执行上下文：不领取容器，也不启动预热池。
         sandbox_backend = LocalShellBackend(virtual_mode=True)
         from ..backends.sandbox_holder import set_sandbox
         set_sandbox(None, user_context.user_id)
+        agent_logger.info(
+            f"Sandbox disabled for non-executing graph ({user_context.user_id})"
+        )
 
     # deepagents >= 0.7 要求传入已初始化的 Backend 实例，
     # 不再接受旧版的 backend factory。

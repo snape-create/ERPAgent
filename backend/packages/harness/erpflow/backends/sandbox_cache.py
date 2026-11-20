@@ -43,7 +43,9 @@ class SandboxCache:
                 collection.create_index("user_id", unique=True)
             except Exception as exc:
                 # 旧数据已有重复时建索引会失败；保留 upsert 行为并记录。
+                # 不要在这里置 True：Mongo 恢复/重复数据清理后需要能重试。
                 sandbox_logger.warning(f"Failed to create sandbox_cache unique index: {exc}")
+                return
             self._index_ready = True
 
     def _connect(self):

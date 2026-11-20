@@ -54,6 +54,10 @@ maintenance_interval_seconds = 60
 # 健康检查间隔（秒）（SANDBOX_HEALTH_CHECK_INTERVAL_SECONDS）
 health_check_interval_seconds = 30
 
+# 运行租约最长存活时间（分钟）。HITL/客户端断流可能让 after_agent 不执行；
+# 超过该时间仍未释放的 active_runs 视为孤儿，允许空闲回收。
+lease_timeout_minutes = 120
+
 [sandbox.container]
 # 容器安全防护默认值（SandboxConfig 的默认值）
 read_only = true           # 文件系统只读 + tmpfs 可写

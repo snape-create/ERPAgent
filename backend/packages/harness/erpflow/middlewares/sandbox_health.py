@@ -44,7 +44,9 @@ class SandboxHealthMiddleware(AgentMiddleware[AgentState[Any], None, Any]):
         self._last_check: float = 0.0
         self._healthy = True
         self._consecutive_failures = 0
-        self._lease_held = False
+        # 同一 Graph 可能被多个并发 run 复用；bool 会让第二个 run 不再
+        # acquire，第一个 run 的 after_agent 却把唯一的 lease 释放掉。
+        self._lease_depth = 0
         self._lease_lock = threading.Lock()
         self.tools = []
 
@@ -85,22 +87,20 @@ class SandboxHealthMiddleware(AgentMiddleware[AgentState[Any], None, Any]):
         if self._sandbox_manager is None:
             return
         with self._lease_lock:
-            if self._lease_held:
-                return
             acquire = getattr(self._sandbox_manager, "acquire_lease", None)
             if callable(acquire) and acquire(self._user_id):
-                self._lease_held = True
+                self._lease_depth += 1
 
     def _release_lease(self) -> None:
         if self._sandbox_manager is None:
             return
         with self._lease_lock:
-            if not self._lease_held:
+            if self._lease_depth <= 0:
                 return
             release = getattr(self._sandbox_manager, "release_lease", None)
             if callable(release):
                 release(self._user_id)
-            self._lease_held = False
+            self._lease_depth -= 1
 
     def _check_and_recover(self) -> None:
         # LocalShell fallback 没有 Manager，保持原有开发模式语义。

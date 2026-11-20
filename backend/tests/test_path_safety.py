@@ -7,7 +7,13 @@
 """
 import pytest
 
-from erpflow.tools.path_safety import UnsafePathError, resolve_under, safe_filename
+from erpflow.tools.path_safety import (
+    UnsafePathError,
+    resolve_relative_under,
+    resolve_under,
+    safe_filename,
+    safe_relative_path,
+)
 
 ACCEPTED_NAMES = ["report.md", "a.txt", "中文 报告.md", "x-1_2.json"]
 
@@ -74,6 +80,48 @@ def test_resolve_under_rejects_symlink_escape(tmp_path):
 
     with pytest.raises(UnsafePathError):
         resolve_under(base, "link.txt")
+
+
+# -------------------------------------------------------- relative paths
+
+
+@pytest.mark.parametrize("path", ["report.md", "charts/a.png", "a/b/c.json"])
+def test_safe_relative_path_accepts_relative_subpaths(path):
+    assert safe_relative_path(path) == path
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["../x", "/etc/passwd", "a\\b", "C:\\x", "a/../b", "", ".", "a/./b"],
+)
+def test_safe_relative_path_rejects_unsafe_paths(path):
+    with pytest.raises(UnsafePathError):
+        safe_relative_path(path)
+
+
+def test_resolve_relative_under_accepts_nested_file(tmp_path):
+    target = tmp_path / "charts" / "a.png"
+    target.parent.mkdir()
+    target.write_text("x", encoding="utf-8")
+    assert resolve_relative_under(tmp_path, "charts/a.png") == target.resolve()
+
+
+def test_resolve_relative_under_rejects_symlink_escape(tmp_path):
+    base = tmp_path / "outputs"
+    base.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.txt"
+    secret.write_text("top secret", encoding="utf-8")
+
+    link = base / "link.txt"
+    try:
+        link.symlink_to(secret)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前平台不支持创建符号链接")
+
+    with pytest.raises(UnsafePathError):
+        resolve_relative_under(base, "link.txt")
 
 
 # -------------------------------------------------- download_sandbox_file

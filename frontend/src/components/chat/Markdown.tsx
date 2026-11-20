@@ -20,8 +20,10 @@ interface Props {
 }
 
 const DOWNLOAD_PATH = "/api/download/";
+const ARTIFACT_PATH = "/api/artifacts/";
 const TEXT_FILE_RE = /\.(?:md|markdown|txt|csv|json|log)(?:$|[?#])/i;
 const MARKDOWN_FILE_RE = /\.(?:md|markdown)(?:$|[?#])/i;
+const HTML_DOWNLOAD_RE = /\/api\/(?:download|artifacts)\/[^?#]+\.html?(?:[?#]|$)/i;
 
 /** 仅允许同源的下载链接做文本预览，防止 LLM 输出的链接探测内网 */
 function isPreviewableText(href?: string): boolean {
@@ -32,7 +34,11 @@ function isPreviewableText(href?: string): boolean {
   } catch {
     return false;
   }
-  return url.origin === window.location.origin && url.pathname.includes(DOWNLOAD_PATH) && TEXT_FILE_RE.test(href);
+  return (
+    url.origin === window.location.origin &&
+    (url.pathname.includes(DOWNLOAD_PATH) || url.pathname.includes(ARTIFACT_PATH)) &&
+    TEXT_FILE_RE.test(href)
+  );
 }
 
 function fileNameFromHref(href: string): string {
@@ -42,6 +48,19 @@ function fileNameFromHref(href: string): string {
   } catch {
     return raw;
   }
+}
+
+/**
+ * HTML 产物不能以同源新标签直接执行：给它加 download=1，让 gateway 返回
+ * attachment；预览仍走 ArtifactPanel 的 sandbox iframe。
+ */
+function forceHtmlDownload(href: string): string | null {
+  if (!HTML_DOWNLOAD_RE.test(href)) return null;
+  const hashIndex = href.indexOf("#");
+  const hash = hashIndex >= 0 ? href.slice(hashIndex) : "";
+  const base = hashIndex >= 0 ? href.slice(0, hashIndex) : href;
+  const separator = base.includes("?") ? "&" : "?";
+  return `${base}${separator}download=1${hash}`;
 }
 
 type PreviewState = {
@@ -56,11 +75,13 @@ function MarkdownLink({
   onPreview,
   ...props
 }: ComponentProps<"a"> & { onPreview: (event: MouseEvent<HTMLAnchorElement>, href?: string) => void }) {
+  const downloadHref = href ? forceHtmlDownload(href) : null;
   return (
     <a
       {...props}
-      href={href}
-      target="_blank"
+      href={downloadHref ?? href}
+      target={downloadHref ? undefined : "_blank"}
+      download={downloadHref ? fileNameFromHref(href!) : undefined}
       rel="noopener noreferrer"
       onClick={(event) => onPreview(event, href)}
     />

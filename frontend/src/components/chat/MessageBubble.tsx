@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import {
   Bot,
   User,
@@ -9,9 +9,11 @@ import {
   Wrench,
 } from "lucide-react";
 import { ChatMessage } from "@/lib/types";
+import { extractChatArtifacts } from "@/lib/artifacts";
 import { useTypewriter } from "@/hooks/useTypewriter";
 import ToolCallDisplay from "./ToolCallDisplay";
 import Markdown from "./Markdown";
+import ArtifactPanel from "./ArtifactPanel";
 
 interface Props {
   message: ChatMessage;
@@ -20,6 +22,14 @@ interface Props {
 }
 
 const COLLAPSE_THRESHOLD = 3;
+
+// 这些工具正在运行时，产物往往还没落成链接；给用户一个"在生成"的反馈
+const FILE_GENERATING_TOOLS = new Set([
+  "generate_document",
+  "generate_table_report",
+  "download_sandbox_file",
+  "generate_chart",
+]);
 
 function MessageBubble({
   message,
@@ -35,6 +45,20 @@ function MessageBubble({
   const [groupExpanded, setGroupExpanded] = useState(!hasMany);
   // 用户消息与历史消息直接全显；仅正在流式回答的气泡逐字推进
   const typed = useTypewriter(message.content, !isUser && !!isStreaming);
+
+  // 正文和工具结果里的下载链接都收进产物面板；纯函数可在 SSR 下运行
+  const artifacts = useMemo(
+    () =>
+      extractChatArtifacts({
+        content: message.content,
+        toolCalls: message.toolCalls,
+      }),
+    [message.content, message.toolCalls]
+  );
+  const generating = toolCalls.some(
+    (tc) => tc.status === "running" && FILE_GENERATING_TOOLS.has(tc.name)
+  );
+  const showArtifactArea = !isUser && (artifacts.length > 0 || generating);
 
   const sourceLabel =
     message.source === "analyst"
@@ -101,7 +125,7 @@ function MessageBubble({
             <span className="typing-dot w-1.5 h-1.5 bg-ink-3 rounded-full inline-block" />
             <span className="typing-dot w-1.5 h-1.5 bg-ink-3 rounded-full inline-block" />
           </div>
-        ) : (
+        ) : message.content ? (
           // 流式与完成态使用同一个渲染路径：流式期显示打字机进度，
           // 结束后 typed 立即追平全文，因此不会出现组件切换导致的跳变
           <div className="markdown-body">
@@ -109,6 +133,13 @@ function MessageBubble({
             {isStreaming && (
               <span className="inline-block w-[2px] h-[1em] bg-accent ml-0.5 align-middle" />
             )}
+          </div>
+        ) : null}
+
+        {/* 生成的产物：正文为空时也单独显示，避免只剩一个空气泡 */}
+        {showArtifactArea && (
+          <div className={message.content ? "mt-3" : "mt-1"}>
+            <ArtifactPanel artifacts={artifacts} generating={generating} />
           </div>
         )}
 

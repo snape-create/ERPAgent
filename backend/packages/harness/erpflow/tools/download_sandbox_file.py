@@ -1,12 +1,12 @@
 """
 沙箱文件下载工具（Harness — 真实 Docker 文件提取）
-从沙箱容器中下载文件到宿主机 backend/download/ 目录，供用户通过 HTTP 访问。
 
-工作原理：
-1. 通过 Docker SDK 连接到 erp-sandbox 容器
-2. 使用 base64 编码读取容器内文件（避免二进制传输问题）
-3. 解码并写入宿主机 download 目录
-4. 返回 HTTP 下载链接
+优先路径：``/mnt/user-data/outputs`` 已经 bind mount 到宿主机
+``backend/.sandbox/users/<user>/user-data/outputs``，因此直接返回
+``/api/artifacts/<user>/...``，不再复制文件。
+
+兼容路径：outputs 之外的临时文件（如 workspace）仍通过 Docker SDK 读取，
+复制到 ``backend/download`` 后由旧 ``/api/download`` 路由提供。
 
 支持的文件类型：
 - 图表 PNG/JPG（generate_chart 生成）
@@ -20,8 +20,15 @@ from urllib.parse import quote
 
 from langchain_core.tools import tool
 
-from ..config import DOWNLOAD_DIR, SANDBOX_ALLOW_LOCAL_FALLBACK, SANDBOX_WORK_DIR
+from ..backends.artifact_store import artifact_store, output_relative_path
+from ..config import (
+    DOWNLOAD_DIR,
+    SANDBOX_ALLOW_LOCAL_FALLBACK,
+    SANDBOX_USER_DATA_MOUNTS,
+    SANDBOX_WORK_DIR,
+)
 from ..log_utils import agent_logger
+from ..runtime_context import get_current_user_id
 from .path_safety import UnsafePathError, resolve_under
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"}
@@ -65,6 +72,43 @@ def _build_result_message(
     if not sandbox:
         lines.append("(注: 沙箱不可用，使用本地文件)")
     return "\n".join(lines)
+
+
+def _try_user_data_artifact(remote_path: str) -> str | None:
+    """直接从宿主机 user-data outputs 提供产物，避免复制到全局 download 目录。
+
+    前提：容器启用了 uploads/outputs bind mount。此时容器内
+    ``/mnt/user-data/outputs/x`` 与宿主机 ``outputs/x`` 是同一文件，
+    不需要再通过 Docker 读一遍。返回给模型的仍是同款 Markdown 链接，
+    但 URL 走 ``/api/artifacts/<user>/...``。
+    """
+    if not SANDBOX_USER_DATA_MOUNTS:
+        return None
+
+    relative_path = output_relative_path(remote_path)
+    if not relative_path:
+        return None
+
+    user_id = get_current_user_id()
+    try:
+        local_path = artifact_store.resolve(user_id, relative_path)
+    except UnsafePathError:
+        return None
+    if not local_path.is_file():
+        return None
+
+    filename = local_path.name
+    download_url = artifact_store.url_for(user_id, relative_path)
+    agent_logger.info(
+        f"Artifact served from user-data outputs: {local_path} -> {download_url}"
+    )
+    return _build_result_message(
+        filename,
+        download_url,
+        local_path.stat().st_size / 1024,
+        sandbox=True,
+        remote_path=remote_path,
+    )
 
 
 def _get_docker_container(remote_path: str = ""):
@@ -131,10 +175,8 @@ def download_sandbox_file(remote_path: str, filename: str = "") -> str:
     """从沙箱容器中下载文件到宿主机，生成 HTTP 下载链接。
 
     工作原理：
-    - 通过 Docker SDK 连接到沙箱容器
-    - 读取容器内文件（支持文本和二进制）
-    - 保存到宿主机 download 目录
-    - 返回 HTTP 下载链接
+    - outputs 内的文件直接返回 user-data artifacts URL（不复制）
+    - outputs 外的文件才回退到 Docker 读取并保存到 download 目录
 
     Args:
         remote_path: 沙箱内的文件路径（如 /mnt/user-data/outputs/report.md）
@@ -155,7 +197,12 @@ def download_sandbox_file(remote_path: str, filename: str = "") -> str:
         return f"文件名非法: {exc}"
     filename = target.name
 
-    # === 方式1：从 Docker 沙箱下载 ===
+    # === 方式0：outputs 已经 bind mount 到宿主机，直接返回 artifact URL ===
+    direct_artifact = _try_user_data_artifact(remote_path)
+    if direct_artifact is not None:
+        return direct_artifact
+
+    # === 方式1：从 Docker 沙箱下载（兼容 outputs 之外的临时路径）===
     container, docker_client = _get_docker_container(remote_path)
     if container is not None:
         try:

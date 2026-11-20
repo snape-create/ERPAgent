@@ -133,3 +133,47 @@ def test_secure_sandbox_passes_volumes_to_docker(monkeypatch, tmp_path):
     assert "/mnt/user-data/uploads" not in kwargs["tmpfs"]
     # 未 bind 的 outputs 仍必须有可写 tmpfs，避免只读 rootfs 上 mkdir 失败。
     assert "/mnt/user-data/outputs" in kwargs["tmpfs"]
+
+def test_tmpfs_sizes_come_from_config():
+    fake_client = MagicMock()
+    fake_client.containers.get.side_effect = docker.errors.NotFound("missing")
+    fake_client.containers.run.return_value = MagicMock(id="abc123")
+    config = SandboxConfig(
+        name="erp-sandbox-test-sizes",
+        workspace_size="111m",
+        skills_size="222m",
+        pydeps_size="333m",
+    )
+
+    with patch("erpflow.backends.sandbox_setup.docker.from_env", return_value=fake_client), \
+         patch("erpflow.backends.sandbox_setup.CustomOpenSandbox"), \
+         patch("erpflow.backends.sandbox_setup._init_runtimes"):
+        create_secure_sandbox(config)
+
+    tmpfs = fake_client.containers.run.call_args.kwargs["tmpfs"]
+    assert tmpfs["/workspace"].endswith("size=111m")
+    assert tmpfs[config.work_dir].endswith("size=111m")
+    assert tmpfs["/skills"].endswith("size=222m")
+    assert tmpfs["/opt/pydeps"].endswith("size=333m")
+
+
+def test_missing_seccomp_profile_fails_closed(tmp_path):
+    config = SandboxConfig(
+        name="erp-sandbox-no-seccomp",
+        use_seccomp=True,
+        seccomp_path=str(tmp_path / "missing.json"),
+    )
+    with pytest.raises(RuntimeError, match="seccomp"):
+        create_secure_sandbox(config)
+
+
+def test_invalid_seccomp_profile_fails_closed(tmp_path):
+    profile = tmp_path / "seccomp.json"
+    profile.write_text("{not-json", encoding="utf-8")
+    config = SandboxConfig(
+        name="erp-sandbox-bad-seccomp",
+        use_seccomp=True,
+        seccomp_path=str(profile),
+    )
+    with pytest.raises(RuntimeError, match="seccomp"):
+        create_secure_sandbox(config)

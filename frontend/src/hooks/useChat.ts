@@ -11,6 +11,7 @@ import {
   HarnessPhase,
 } from "@/lib/types";
 import { streamChat, resumeChat } from "@/lib/api";
+import { hasChatArtifact } from "@/lib/artifacts";
 import { useSSE } from "./useSSE";
 
 const USER_ID = "user-001";
@@ -119,6 +120,7 @@ export function useChat() {
             name: event.name,
             args: "",
             status: "running",
+            startedAt: Date.now(),
           };
           toolCallsRef.current = [...toolCallsRef.current, tc];
           currentToolIdRef.current = event.id;
@@ -321,8 +323,16 @@ export function useChat() {
         }
       }
 
-      // 整轮既没有正文、也没有进入中断 → 明确告知，避免"发消息毫无反应"
-      if (!assistantMsgRef.current && !interruptedRef.current) {
+      // 整轮既没有正文、也没有进入中断 → 明确告知，避免"发消息毫无反应"。
+      // 例外：工具结果里已经带出可下载产物，界面会用产物卡片兜底展示。
+      if (
+        !assistantMsgRef.current &&
+        !interruptedRef.current &&
+        !hasChatArtifact({
+          content: assistantMsgRef.current,
+          toolCalls: toolCallsRef.current,
+        })
+      ) {
         setError("未收到助手回复，请检查后端服务是否正常后重试");
       }
     },

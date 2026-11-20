@@ -107,9 +107,13 @@ def start_warmup() -> None:
     _executor.submit(_ensure_warmup)
 
 
-def _build(user_context: ProcurementContext):
-    """在 executor 线程里完成全部阻塞装配。"""
-    _ensure_warmup()
+def _build(user_context: ProcurementContext, enable_sandbox: bool = True):
+    """在 executor 线程里完成全部阻塞装配。
+
+    非执行上下文（state 读取）不预热沙箱池，也不领取用户容器。
+    """
+    if enable_sandbox:
+        _ensure_warmup()
 
     from ..store import get_store
     from .build import create_main_agent
@@ -118,49 +122,56 @@ def _build(user_context: ProcurementContext):
         user_context=user_context,
         checkpointer=None,   # server 注入
         store=get_store(),
+        enable_sandbox=enable_sandbox,
     )
 
 
-def _remember(user_id: str, future: Future) -> None:
+def _remember(cache_key: str, future: Future) -> None:
     """future 完成时落缓存/清 pending；超时后完成的图也能被后续请求复用。"""
     try:
         graph = future.result()
     except Exception as exc:
         with _lock:
-            _pending.pop(user_id, None)
-        agent_logger.warning(f"Graph build failed for {user_id}: {exc}")
+            _pending.pop(cache_key, None)
+        agent_logger.warning(f"Graph build failed for {cache_key}: {exc}")
         return
     with _lock:
-        _graphs[user_id] = graph
-        _pending.pop(user_id, None)
-    agent_logger.info(f"Graph cached for {user_id}")
+        _graphs[cache_key] = graph
+        _pending.pop(cache_key, None)
+    agent_logger.info(f"Graph cached for {cache_key}")
 
 
 def get_or_build(
     user_context: ProcurementContext,
     timeout: float = BUILD_TIMEOUT_SECONDS,
+    *,
+    enable_sandbox: bool = True,
 ):
-    """返回该用户的图；未命中则在线程池里装配。"""
+    """返回该用户的图；未命中则在线程池里装配。
+
+    ``enable_sandbox=False`` 用于 state 读取等非执行路径，缓存键与执行图分开。
+    """
     user_id = user_context.user_id
+    cache_key = user_id if enable_sandbox else f"__readonly__:{user_id}"
 
     with _lock:
-        cached = _graphs.get(user_id)
+        cached = _graphs.get(cache_key)
         if cached is not None:
             return cached
-        future = _pending.get(user_id)
+        future = _pending.get(cache_key)
         if future is None:
-            future = _executor.submit(_build, user_context)
+            future = _executor.submit(_build, user_context, enable_sandbox)
             future.add_done_callback(
-                lambda fut, uid=user_id: _remember(uid, fut)
+                lambda fut, key=cache_key: _remember(key, fut)
             )
-            _pending[user_id] = future
+            _pending[cache_key] = future
 
     try:
         # 事件循环线程只等 future，不碰 Docker/磁盘/pymongo。
         return future.result(timeout=timeout)
     except TimeoutError:
         agent_logger.error(
-            f"Graph build for {user_id} timed out after {timeout}s"
+            f"Graph build for {cache_key} timed out after {timeout}s"
         )
         raise
 

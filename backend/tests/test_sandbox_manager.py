@@ -4,6 +4,8 @@ from __future__ import annotations
 import threading
 from datetime import datetime, timedelta
 
+import pytest
+
 from erpflow.backends.sandbox_entry import SandboxEntry, SandboxState
 from erpflow.backends.sandbox_manager import SandboxManager
 
@@ -37,6 +39,7 @@ def _manager(cache=None):
     manager._warm_creating = 0
     manager._warm_pool_size = 0
     manager._idle_timeout = timedelta(minutes=30)
+    manager._lease_timeout = timedelta(minutes=120)
     manager._cache = cache or FakeCache()
     return manager
 
@@ -73,11 +76,47 @@ def test_acquire_and_release_lease_roundtrip():
 
     assert manager.acquire_lease("alice") is True
     assert entry.active_runs == 1
+    assert entry.lease_last_updated is not None
     manager.release_lease("alice")
     assert entry.active_runs == 0
+    assert entry.lease_last_updated is None
     # 不存在的用户不会把计数变负。
     manager.release_lease("missing")
     assert entry.active_runs == 0
+
+
+def test_cleanup_reclaims_stale_lease():
+    manager = _manager()
+    entry = _entry(manager, "stale", age_minutes=60, active_runs=1)
+    entry.lease_last_updated = datetime.now() - timedelta(minutes=121)
+
+    manager.cleanup_idle_sandboxes()
+
+    assert entry.sandbox.destroyed == 1
+    assert entry.container_name not in manager._entries
+
+
+def test_cleanup_keeps_recent_lease():
+    manager = _manager()
+    entry = _entry(manager, "busy", age_minutes=60, active_runs=1)
+    entry.lease_last_updated = datetime.now() - timedelta(minutes=5)
+
+    manager.cleanup_idle_sandboxes()
+
+    assert entry.sandbox.destroyed == 0
+    assert manager._user_map.get("busy") == entry.container_name
+    assert manager._entries.get(entry.container_name) is entry
+    assert entry.active_runs == 1
+
+
+def test_rebuild_refuses_active_sandbox():
+    manager = _manager()
+    entry = _entry(manager, "busy", age_minutes=0, active_runs=1)
+
+    with pytest.raises(RuntimeError, match="active run"):
+        manager.rebuild("busy")
+
+    assert entry.sandbox.destroyed == 0
 
 
 def test_destroy_user_sandbox_destroys_container_and_clears_cache():
@@ -103,3 +142,11 @@ def test_destroy_all_destroys_every_container():
     assert b.sandbox.destroyed == 1
     assert manager._entries == {}
     assert manager._user_map == {}
+
+def test_active_user_ids_only_returns_leased_users():
+    manager = _manager()
+    _entry(manager, "idle", age_minutes=0)
+    busy = _entry(manager, "busy", age_minutes=0, active_runs=1)
+    busy.lease_last_updated = datetime.now()
+
+    assert manager.active_user_ids() == {"busy"}

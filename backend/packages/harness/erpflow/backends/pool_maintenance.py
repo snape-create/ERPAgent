@@ -29,7 +29,9 @@ def _loop(stop_event: threading.Event) -> None:
 
             now = time.monotonic()
             if now - last_cleanup >= SANDBOX_USER_DATA_CLEANUP_INTERVAL_SECONDS:
-                cleanup_expired_user_data()
+                cleanup_expired_user_data(
+                    active_user_ids=sandbox_manager.active_user_ids()
+                )
                 last_cleanup = now
         except Exception as exc:
             sandbox_logger.warning(f"Sandbox maintenance iteration failed: {exc}")

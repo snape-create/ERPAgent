@@ -22,8 +22,8 @@ from ..config import (
     SANDBOX_IMAGE,
     SANDBOX_OUTPUTS_DIR,
     SANDBOX_PYTHON_PACKAGES_DIR,
+    SANDBOX_SKILLS_DIR,
     SANDBOX_UPLOADS_DIR,
-    SANDBOX_USER_DATA_ROOT,
     SANDBOX_WORK_DIR,
 )
 from ..log_utils import sandbox_logger
@@ -119,15 +119,25 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
     network_mode = validate_network_mode(config.network_mode)
 
     seccomp_path = config.seccomp_path or _BUILTIN_SECCOMP
-    seccomp_profile = None
-    if config.use_seccomp and Path(seccomp_path).exists():
-        with open(seccomp_path) as f:
-            seccomp_profile = f.read()
-    elif config.use_seccomp:
-        sandbox_logger.warning(
-            f"seccomp enabled but profile not found: {seccomp_path}; "
-            "container will start WITHOUT seccomp"
-        )
+    seccomp_profile: dict | None = None
+    if config.use_seccomp:
+        if not Path(seccomp_path).is_file():
+            raise RuntimeError(
+                f"seccomp is enabled but profile not found: {seccomp_path}. "
+                "Refusing to start the sandbox without seccomp."
+            )
+        try:
+            with open(seccomp_path, encoding="utf-8") as f:
+                seccomp_profile = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"seccomp is enabled but profile is unreadable/invalid: "
+                f"{seccomp_path}: {exc}"
+            ) from exc
+        if not isinstance(seccomp_profile, dict):
+            raise RuntimeError(
+                f"seccomp profile must be a JSON object: {seccomp_path}"
+            )
     else:
         sandbox_logger.warning("seccomp is disabled by configuration")
 
@@ -155,15 +165,15 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
     tmpfs = {
         "/tmp": f"rw,noexec,nosuid,size={config.tmpfs_size}",
         # 兼容旧路径；新工具统一使用 /mnt/user-data。
-        "/workspace": "rw,noexec,nosuid,size=256m",
+        "/workspace": f"rw,noexec,nosuid,size={config.workspace_size}",
         # workspace 是临时的（Q3=A）；uploads/outputs 由 bind mount 覆盖。
-        f"{SANDBOX_USER_DATA_ROOT}/workspace": "rw,noexec,nosuid,size=256m",
+        config.work_dir: f"rw,noexec,nosuid,size={config.workspace_size}",
         # Python 依赖必须放在可执行挂载点：workspace 是 noexec，
         # 从那里加载 C 扩展会 "failed to map segment from shared object"。
-        SANDBOX_PYTHON_PACKAGES_DIR: "rw,exec,nosuid,nodev,size=512m",
+        SANDBOX_PYTHON_PACKAGES_DIR: f"rw,exec,nosuid,nodev,size={config.pydeps_size}",
         # ``--read-only`` 会让根目录下的 /skills 不可写；Skills 同步、
         # 用户 Skills 恢复都必须在独立的可写挂载点完成。
-        "/skills": "rw,nosuid,nodev,size=128m",
+        SANDBOX_SKILLS_DIR: f"rw,nosuid,nodev,size={config.skills_size}",
     }
 
     # 宿主机 bind mount（uploads/outputs）。Docker SDK 要求 host path 为绝对路径。
@@ -215,12 +225,9 @@ def create_secure_sandbox(config: SandboxConfig | None = None) -> CustomOpenSand
     # docker-desktop 发行版里，读不到宿主机 /home 下的文件，传路径会被当成
     # JSON 解析并以 "Decoding seccomp profile failed" 失败，整层防护静默降级。
     security_opts = []
-    if seccomp_profile:
-        try:
-            compact = json.dumps(json.loads(seccomp_profile), separators=(",", ":"))
-            security_opts.append(f"seccomp={compact}")
-        except json.JSONDecodeError as e:
-            sandbox_logger.warning(f"Invalid seccomp profile, skipping: {e}")
+    if seccomp_profile is not None:
+        compact = json.dumps(seccomp_profile, separators=(",", ":"))
+        security_opts.append(f"seccomp={compact}")
     security_opts.append("no-new-privileges:true")
     host_config_kwargs["security_opt"] = security_opts
 

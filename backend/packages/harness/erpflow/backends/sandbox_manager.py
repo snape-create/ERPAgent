@@ -30,6 +30,7 @@ from typing import Optional
 
 from ..config import (
     SANDBOX_IDLE_TIMEOUT_MINUTES,
+    SANDBOX_LEASE_TIMEOUT_MINUTES,
     SANDBOX_USER_DATA_MOUNTS,
     SANDBOX_WARM_POOL_SIZE,
 )
@@ -91,6 +92,7 @@ class SandboxManager:
             else idle_timeout_minutes
         )
         self._idle_timeout = timedelta(minutes=effective_idle_timeout)
+        self._lease_timeout = timedelta(minutes=SANDBOX_LEASE_TIMEOUT_MINUTES)
         self._lock = threading.Lock()
 
         sandbox_logger.info(
@@ -401,18 +403,21 @@ class SandboxManager:
             if container_name and container_name in self._entries:
                 old_entry = self._entries[container_name]
                 active_runs = old_entry.active_runs
-                self._remove_entry(old_entry)
+
+        if active_runs:
+            # 另一个并发 run 仍在用同一个 Proxy；此时替换 backend 会把它
+            # 正在使用的容器换掉。宁可让当前健康检查失败，也不误伤活跃请求。
+            raise RuntimeError(
+                f"Refusing to rebuild sandbox for {user_id}: {active_runs} active run(s)"
+            )
 
         if old_entry is not None:
+            with self._lock:
+                if self._entries.get(old_entry.container_name) is old_entry:
+                    self._remove_entry(old_entry)
             self._destroy_entry(old_entry)
 
-        sandbox = self._create_for_user(user_id)
-        if active_runs:
-            with self._lock:
-                replacement = self._entries.get(self._user_map.get(user_id, ""))
-                if replacement is not None:
-                    replacement.active_runs = active_runs
-        return sandbox
+        return self._create_for_user(user_id)
 
     def destroy_user_sandbox(self, user_id: str) -> None:
         """销毁用户沙箱。"""
@@ -472,7 +477,20 @@ class SandboxManager:
                 if entry.state not in (SandboxState.CLAIMED, SandboxState.CACHED):
                     continue
                 if entry.active_runs > 0:
-                    continue
+                    lease_age = (
+                        now - entry.lease_last_updated
+                        if entry.lease_last_updated is not None
+                        else None
+                    )
+                    if lease_age is None or lease_age <= self._lease_timeout:
+                        continue
+                    sandbox_logger.warning(
+                        f"Reclaiming stale lease for {entry.container_name}: "
+                        f"active_runs={entry.active_runs}, "
+                        f"last lease {lease_age.total_seconds()/60:.0f}min ago"
+                    )
+                    entry.active_runs = 0
+                    entry.lease_last_updated = None
                 idle_time = now - entry.last_active_at
                 if idle_time <= self._idle_timeout:
                     continue
@@ -499,6 +517,19 @@ class SandboxManager:
         container_name = self._user_map.get(user_id)
         return self._entries.get(container_name) if container_name else None
 
+    def active_user_ids(self) -> set[str]:
+        """返回当前进程里有活跃 lease 的用户；供 user-data TTL 清理使用。
+
+        不能只看 Docker 里有没有 running 容器：进程重启后遗留的 cached
+        user 容器会一直 running，从而永久阻止 TTL 清理文件。
+        """
+        with self._lock:
+            return {
+                entry.user_id
+                for entry in self._entries.values()
+                if entry.user_id and entry.active_runs > 0
+            }
+
     def get_active_container(self, user_id: str = "default_user") -> str | None:
         """获取用户当前活跃的容器ID（供健康检查中间件使用）。"""
         with self._lock:
@@ -521,6 +552,7 @@ class SandboxManager:
             if entry is None:
                 return False
             entry.active_runs += 1
+            entry.lease_last_updated = datetime.now()
             entry.touch()
             return True
 
@@ -530,6 +562,9 @@ class SandboxManager:
             entry = self._entry_of(user_id)
             if entry is not None:
                 entry.active_runs = max(0, entry.active_runs - 1)
+                entry.lease_last_updated = (
+                    datetime.now() if entry.active_runs else None
+                )
                 entry.touch()
 
     def health_check_all(self) -> None:
@@ -543,7 +578,7 @@ class SandboxManager:
                 f"Unhealthy sandbox detected: {entry.container_name} "
                 f"(user={entry.user_id})"
             )
-            if entry.user_id:
+            if entry.user_id and entry.active_runs == 0:
                 self.rebuild(entry.user_id)
 
     # ============================================================

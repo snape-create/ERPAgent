@@ -158,6 +158,57 @@ class ChatTurnDictStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(turn.tool_calls[0]["status"], "done")
         self.assertEqual(turn.tool_calls[0]["result"], "库存 3 件")
 
+    async def test_tool_only_turn_is_persisted(self):
+        """纯工具轮次没有正文，也必须把 tool_calls 落库。
+
+        否则 HTML/文件下载链接只存在于 SSE 流里，刷新后助手消息消失，
+        用户会觉得“Agent 生成了文件但前端没反应”。
+        """
+        turn = self.turn()
+        await turn.handle_message(
+            [],
+            [
+                {
+                    "type": "ai",
+                    "content": "",
+                    "tool_call_chunks": [
+                        {
+                            "name": "download_sandbox_file",
+                            "args": '{"remote_path": "/mnt/user-data/outputs/report.html"}',
+                            "id": "call-html",
+                        }
+                    ],
+                },
+                {"tags": []},
+            ],
+        )
+        await turn.handle_message(
+            [],
+            [
+                {
+                    "type": "tool",
+                    "name": "download_sandbox_file",
+                    "tool_call_id": "call-html",
+                    "content": (
+                        "[下载 report.html]"
+                        "(/api/download/report.html)\n文件大小: 16.9 KB"
+                    ),
+                },
+                {"tags": []},
+            ],
+        )
+
+        snapshot = turn.snapshot()
+        self.assertEqual(len(snapshot), 1)
+        self.assertEqual(snapshot[0]["role"], "assistant")
+        self.assertEqual(snapshot[0]["content"], "")
+        self.assertEqual(snapshot[0]["toolCalls"][0]["name"], "download_sandbox_file")
+        self.assertIn("/api/download/report.html", snapshot[0]["toolCalls"][0]["result"])
+
+        turn.append_assistant()
+        self.assertEqual(len(turn.display_messages), 1)
+        self.assertEqual(turn.display_messages[0]["toolCalls"][0]["name"], "download_sandbox_file")
+
     async def test_review_router_tags_filtered(self):
         turn = self.turn()
         events = await turn.handle_message(

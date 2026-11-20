@@ -205,6 +205,27 @@ class LeaseTests(unittest.TestCase):
         middleware.after_agent({}, None)
         self.assertEqual(manager.leases, 0)
 
+    def test_concurrent_runs_hold_independent_leases(self):
+        healthy = FakeSandbox("healthy")
+        proxy = SandboxBackendProxy(healthy)
+        manager = FakeManager(healthy)
+        middleware = SandboxHealthMiddleware(
+            sandbox_manager=manager,
+            user_id="alice",
+            sandbox_backend=proxy,
+            check_interval=9999,
+        )
+
+        middleware.before_agent({}, None)
+        middleware.before_agent({}, None)
+        self.assertEqual(manager.leases, 2)
+
+        middleware.after_agent({}, None)
+        self.assertEqual(manager.leases, 1)
+
+        middleware.after_agent({}, None)
+        self.assertEqual(manager.leases, 0)
+
 
 class SkillsLifecycleTests(unittest.TestCase):
     def test_core_skills_resync_after_proxy_generation_changes(self):

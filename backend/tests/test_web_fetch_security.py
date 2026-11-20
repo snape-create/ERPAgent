@@ -114,3 +114,135 @@ def test_archive_normal_zip_extracts():
         "SKILL.md": b"# demo",
         "scripts/run.py": b"print('hi')",
     }
+
+
+class _FakeResponse:
+    def __init__(self, url, status_code=200, *, location=None, body=b"", content_type="text/plain"):
+        self.url = url
+        self.status_code = status_code
+        self.headers = {"content-type": content_type}
+        if location:
+            self.headers["location"] = location
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def iter_bytes(self):
+        yield self._body
+
+
+class _FakeClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.requests = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def stream(self, method, url):
+        self.requests.append(url)
+        return self.responses.pop(0)
+
+
+def test_http_get_validates_redirect_before_request(monkeypatch):
+    fake = _FakeClient([
+        _FakeResponse("http://public.example/start", 302, location="http://internal.example/secret"),
+    ])
+    seen = []
+
+    def validate(url):
+        seen.append(url)
+        if "internal.example" in url:
+            raise ValueError("blocked internal redirect")
+        return url
+
+    monkeypatch.setattr(wf, "_validate_url", validate)
+    monkeypatch.setattr(wf.httpx, "Client", lambda **kwargs: fake)
+
+    with pytest.raises(ValueError, match="blocked"):
+        wf._http_get_limited("http://public.example/start", 100)
+
+    # 关键：只请求了公网起点，没有请求被拦截的 Location。
+    assert fake.requests == ["http://public.example/start"]
+    assert "http://internal.example/secret" in seen
+
+
+def test_http_get_follows_valid_redirect(monkeypatch):
+    fake = _FakeClient([
+        _FakeResponse("http://public.example/start", 302, location="/next"),
+        _FakeResponse("http://public.example/next", 200, body=b"ok"),
+    ])
+    monkeypatch.setattr(wf, "_validate_url", lambda url: url)
+    monkeypatch.setattr(wf.httpx, "Client", lambda **kwargs: fake)
+
+    body, content_type, final_url = wf._http_get_limited("http://public.example/start", 100)
+
+    assert body == b"ok"
+    assert content_type == "text/plain"
+    assert final_url == "http://public.example/next"
+    assert fake.requests == [
+        "http://public.example/start",
+        "http://public.example/next",
+    ]
+
+
+class _FakeDependencySandbox:
+    def __init__(self, *, has_requirements=True, exit_code=0, output=""):
+        self.has_requirements = has_requirements
+        self.exit_code = exit_code
+        self.output = output
+        self.writes = []
+        self.commands = []
+
+    def file_exists(self, path):
+        return self.has_requirements
+
+    def read_file_bytes(self, path):
+        return b"numpy==2.0.0\n"
+
+    def write_file(self, path, content):
+        self.writes.append((path, content))
+
+    def execute(self, command, timeout=None):
+        self.commands.append(command)
+        from types import SimpleNamespace
+
+        return SimpleNamespace(exit_code=self.exit_code, output=self.output)
+
+
+def test_skill_dependency_status_skipped_without_requirements():
+    sandbox = _FakeDependencySandbox(has_requirements=False)
+
+    status = wf._install_dependencies_in_sandbox(sandbox, "/tmp/skill", "demo")
+
+    assert status == "skipped"
+    assert sandbox.commands == []
+
+
+def test_skill_dependency_status_installed():
+    sandbox = _FakeDependencySandbox(exit_code=0)
+
+    status = wf._install_dependencies_in_sandbox(sandbox, "/tmp/skill", "demo")
+
+    assert status == "installed"
+    assert any("pip install" in command for command in sandbox.commands)
+
+
+def test_skill_dependency_status_surfaces_pip_failure():
+    sandbox = _FakeDependencySandbox(
+        exit_code=1,
+        output="No matching distribution found for numpy\n(retry later)",
+    )
+
+    status = wf._install_dependencies_in_sandbox(sandbox, "/tmp/skill", "demo")
+
+    assert status.startswith("failed:")
+    assert "No matching distribution" in status
+    assert "\n" not in status

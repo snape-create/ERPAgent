@@ -122,6 +122,11 @@ SANDBOX_MAINTENANCE_INTERVAL_SECONDS = _sandbox_get(
 SANDBOX_HEALTH_CHECK_INTERVAL_SECONDS = _sandbox_get(
     "", "health_check_interval_seconds", "SANDBOX_HEALTH_CHECK_INTERVAL_SECONDS", 30, _to_int
 )
+# 运行租约最长存活时间：HITL/客户端断流可能让 after_agent 不执行，
+# 超过该时间仍未释放的 active_runs 视为孤儿，允许空闲回收。
+SANDBOX_LEASE_TIMEOUT_MINUTES = _sandbox_get(
+    "", "lease_timeout_minutes", "SANDBOX_LEASE_TIMEOUT_MINUTES", 120, _to_int
+)
 # 仅本地开发：沙箱不可用时允许从宿主机 DOWNLOAD_DIR 读取文件。
 # 生产必须保持 false，避免把服务器文件系统暴露给模型。
 SANDBOX_ALLOW_LOCAL_FALLBACK = _sandbox_get(
@@ -178,5 +183,6 @@ class SandboxSettings(BaseModel):
     idle_timeout_minutes: int = SANDBOX_IDLE_TIMEOUT_MINUTES
     maintenance_interval_seconds: int = SANDBOX_MAINTENANCE_INTERVAL_SECONDS
     health_check_interval_seconds: int = SANDBOX_HEALTH_CHECK_INTERVAL_SECONDS
+    lease_timeout_minutes: int = SANDBOX_LEASE_TIMEOUT_MINUTES
     allow_local_fallback: bool = SANDBOX_ALLOW_LOCAL_FALLBACK
     container: dict = SANDBOX_CONTAINER

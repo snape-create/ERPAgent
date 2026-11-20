@@ -5,7 +5,7 @@
 安全约束：
 - 只删除超过 TTL 的**文件**，再移除空目录；
 - 读取 ``user-data/.meta.json`` 得到 user_id；元数据缺失的目录跳过；
-- 如果该用户仍有运行中的 ``erp-sandbox-<user>-*`` 容器，整户跳过；
+- 优先按当前进程的活跃 lease 跳过；没有 lease 信息时兼容旧的 Docker 容器判断；
 - Docker 不可用时直接跳过（宁可不清，也不误删活跃用户数据）。
 """
 from __future__ import annotations
@@ -78,6 +78,7 @@ def cleanup_expired_user_data(
     uploads_ttl_days: int | None = None,
     outputs_ttl_days: int | None = None,
     active_container_names: list[str] | None = None,
+    active_user_ids: set[str] | None = None,
 ) -> int:
     """按 TTL 清理 uploads/outputs，返回删除的文件数。"""
     uploads_days = SANDBOX_UPLOADS_TTL_DAYS if uploads_ttl_days is None else uploads_ttl_days
@@ -85,10 +86,11 @@ def cleanup_expired_user_data(
     if uploads_days <= 0 and outputs_days <= 0:
         return 0
 
-    if active_container_names is None:
-        active_container_names = _active_container_names()
-    if active_container_names is None:
-        return 0
+    if active_user_ids is None:
+        if active_container_names is None:
+            active_container_names = _active_container_names()
+        if active_container_names is None:
+            return 0
 
     users_root = SANDBOX_DATA_ROOT / "users"
     if not users_root.is_dir():
@@ -111,10 +113,15 @@ def cleanup_expired_user_data(
             sandbox_logger.debug(f"Skip cleanup for {data_root}: missing/invalid metadata")
             continue
 
-        prefix = _container_prefix_for_user(user_id)
-        if any(name.startswith(prefix) for name in active_container_names):
-            sandbox_logger.debug(f"Skip cleanup for active user {user_id}")
-            continue
+        if active_user_ids is not None:
+            if user_id in active_user_ids:
+                sandbox_logger.debug(f"Skip cleanup for active user {user_id}")
+                continue
+        else:
+            prefix = _container_prefix_for_user(user_id)
+            if any(name.startswith(prefix) for name in active_container_names or []):
+                sandbox_logger.debug(f"Skip cleanup for active user {user_id}")
+                continue
 
         if uploads_days > 0:
             removed += _delete_old_files(data_root / "uploads", uploads_cutoff)

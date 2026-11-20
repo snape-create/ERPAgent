@@ -35,7 +35,7 @@ def _patch_factory(monkeypatch, builder):
 def test_same_user_reuses_graph(monkeypatch):
     built: list[str] = []
 
-    def fake_create(user_context=None, checkpointer=None, store=None):
+    def fake_create(user_context=None, checkpointer=None, store=None, **kwargs):
         built.append(user_context.user_id)
         return object()
 
@@ -56,6 +56,34 @@ def test_same_user_reuses_graph(monkeypatch):
     assert built == ["alice", "bob"]
 
 
+def test_missing_user_builds_sandboxless_readonly_graph(monkeypatch):
+    calls: list[tuple[str, bool]] = []
+
+    def fake_create(user_context=None, checkpointer=None, store=None, **kwargs):
+        calls.append((user_context.user_id, kwargs.get("enable_sandbox", True)))
+        return object()
+
+    _patch_factory(monkeypatch, fake_create)
+
+    first = graph_module.make_lead_agent(None)
+    second = graph_module.make_lead_agent({"configurable": {}})
+    assert first is second
+    assert calls == [(graph_module.READONLY_USER_ID, False)]
+
+
+def test_execution_with_user_id_enables_sandbox(monkeypatch):
+    calls: list[tuple[str, bool]] = []
+
+    def fake_create(user_context=None, checkpointer=None, store=None, **kwargs):
+        calls.append((user_context.user_id, kwargs.get("enable_sandbox", True)))
+        return object()
+
+    _patch_factory(monkeypatch, fake_create)
+
+    graph_module.make_lead_agent({"configurable": {"user_id": "frank"}})
+    assert calls == [("frank", True)]
+
+
 def test_blocking_work_runs_in_executor_thread(monkeypatch):
     calls: list[tuple[str, str]] = []
     main_thread = threading.current_thread()
@@ -69,7 +97,7 @@ def test_blocking_work_runs_in_executor_thread(monkeypatch):
         record("os.getcwd")
         return real_getcwd()
 
-    def fake_create(user_context=None, checkpointer=None, store=None):
+    def fake_create(user_context=None, checkpointer=None, store=None, **kwargs):
         fake_getcwd()
         record("create_main_agent")
         return object()
@@ -108,7 +136,7 @@ def test_warmup_runs_once_and_failure_is_non_fatal(monkeypatch):
         attempts.append(1)
         raise RuntimeError("mcp unavailable")
 
-    def fake_create(user_context=None, checkpointer=None, store=None):
+    def fake_create(user_context=None, checkpointer=None, store=None, **kwargs):
         return object()
 
     monkeypatch.setattr("erpflow.agent.build.create_main_agent", fake_create)

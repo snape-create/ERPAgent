@@ -21,6 +21,7 @@ from app.gateway.routers.history import router as history_router
 from app.gateway.routers.mcp import router as mcp_router
 from app.gateway.routers.uploads import router as uploads_router
 from app.repositories.mongo import close_mongo_client
+from erpflow.backends.artifact_store import artifact_store
 from erpflow.config import DOWNLOAD_DIR
 from erpflow.log_utils import web_logger
 from erpflow.tools.path_safety import UnsafePathError, resolve_under
@@ -64,38 +65,53 @@ def create_app() -> FastAPI:
     app.include_router(mcp_router)       # /api/mcp/*
     app.include_router(uploads_router)   # /api/uploads
 
-    @app.get("/api/download/{filename}")
-    async def download_file(filename: str):
-        """提供生成文件的 HTTP 访问。
+    def _file_response(file_path, display_name: str, *, force_download: bool = False):
+        """统一的文件响应：图片/PDF/文本默认 inline，其余 attachment。"""
+        media_type = guess_type(display_name)[0] or "application/octet-stream"
+        inline = (
+            media_type.startswith("image/")
+            or media_type == "application/pdf"
+            or media_type.startswith("text/")
+        )
+        disposition = "attachment" if force_download or not inline else "inline"
+        try:
+            encoded_name = quote(display_name)
+        except Exception:
+            encoded_name = display_name
+        return FileResponse(
+            path=str(file_path),
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f"{disposition}; filename*=utf-8''{encoded_name}",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
-        图片/PDF 用 inline，让浏览器直接预览；其他类型保持 attachment 下载。
+    @app.get("/api/artifacts/{user_id}/{file_path:path}")
+    async def artifact_file(user_id: str, file_path: str, download: bool = False):
+        """直接提供当前用户 outputs 下的产物，不再复制到全局 download 目录。
+
+        当前网关还没有登录会话，user_id 仍由调用方传入；生产环境应改为从
+        认证态推导。路径解析与符号链接逃逸由 ArtifactStore 统一处理。
         """
+        try:
+            resolved = artifact_store.resolve(user_id, file_path)
+        except UnsafePathError as exc:
+            raise HTTPException(status_code=400, detail=f"文件路径非法: {exc}") from exc
+        if not resolved.exists() or not resolved.is_file():
+            raise HTTPException(status_code=404, detail="文件不存在")
+        return _file_response(resolved, resolved.name, force_download=download)
+
+    @app.get("/api/download/{filename}")
+    async def download_file(filename: str, download: bool = False):
+        """兼容旧链接：提供 backend/download 下的生成文件。"""
         try:
             file_path = resolve_under(DOWNLOAD_DIR, filename)
         except UnsafePathError as exc:
             raise HTTPException(status_code=400, detail=f"文件名非法: {exc}") from exc
         if not file_path.exists() or not file_path.is_file():
             raise HTTPException(status_code=404, detail=f"文件不存在: {filename}")
-
-        media_type = guess_type(filename)[0] or "application/octet-stream"
-        inline = (
-            media_type.startswith("image/")
-            or media_type == "application/pdf"
-            or media_type.startswith("text/")
-        )
-        disposition = "inline" if inline else "attachment"
-        try:
-            encoded_name = quote(filename)
-        except Exception:
-            encoded_name = filename
-        headers = {
-            "Content-Disposition": f"{disposition}; filename*=utf-8''{encoded_name}",
-        }
-        return FileResponse(
-            path=str(file_path),
-            media_type=media_type,
-            headers=headers,
-        )
+        return _file_response(file_path, filename, force_download=download)
 
     @app.get("/")
     async def root():

@@ -18,7 +18,7 @@ import socket
 import tarfile
 import zipfile
 from pathlib import PurePosixPath
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 import yaml
@@ -104,42 +104,64 @@ def _validate_url(url: str) -> str:
     return url
 
 
+_REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
+_MAX_REDIRECTS = 5
+
+
 def _http_get_limited(
     url: str, max_bytes: int, timeout: float = 30.0
 ) -> tuple[bytes, str, str]:
-    """带大小上限的 HTTP GET，返回 (内容字节, content-type, 最终 URL)。"""
-    _validate_url(url)
+    """带大小上限的 HTTP GET，返回 (内容字节, content-type, 最终 URL)。
 
-    with (
-        httpx.Client(
-            follow_redirects=True,
-            max_redirects=5,
-            timeout=timeout,
-            headers=_FETCH_HEADERS,
-        ) as client,
-        client.stream("GET", url) as response,
-    ):
-        if response.status_code != 200:
-            raise _HttpStatusError(response.status_code)
+    重定向必须手动逐跳处理：httpx 的 ``follow_redirects=True`` 会先请求
+    Location 目标，再让调用方看到最终 URL；此时内部地址已经被访问过了。
+    这里每拿到一个 Location，先 ``_validate_url``，通过后才发下一跳。
+    """
+    current_url = _validate_url(url)
 
-        final_url = str(response.url)
-        # 重定向目标同样要做 SSRF 校验
-        _validate_url(final_url)
-        content_type = response.headers.get("content-type", "")
+    with httpx.Client(
+        follow_redirects=False,
+        timeout=timeout,
+        headers=_FETCH_HEADERS,
+    ) as client:
+        for redirect_count in range(_MAX_REDIRECTS + 1):
+            with client.stream("GET", current_url) as response:
+                if response.status_code in _REDIRECT_CODES:
+                    if redirect_count >= _MAX_REDIRECTS:
+                        raise ValueError(f"重定向次数超过限制: {url}")
+                    location = response.headers.get("location")
+                    if not location:
+                        raise ValueError(
+                            f"重定向响应缺少 Location（HTTP {response.status_code}）"
+                        )
+                    next_url = urljoin(current_url, location)
+                    # 必须在发起下一跳请求之前校验，不能等请求完再校验。
+                    current_url = _validate_url(next_url)
+                    continue
 
-        chunks: list[bytes] = []
-        total = 0
-        for chunk in response.iter_bytes():
-            total += len(chunk)
-            if total > max_bytes:
-                limit_mb = max_bytes // (1024 * 1024)
-                raise ValueError(f"下载内容超过大小限制（最大 {limit_mb} MB）: {final_url}")
-            chunks.append(chunk)
+                if response.status_code != 200:
+                    raise _HttpStatusError(response.status_code)
 
-    # 请求结束后再次校验最终 URL，防止重定向到内网
-    _validate_url(final_url)
+                final_url = str(response.url)
+                # 防御性复核：确保实际请求 URL 仍是校验通过的那个。
+                _validate_url(final_url)
+                content_type = response.headers.get("content-type", "")
 
-    return b"".join(chunks), content_type, final_url
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in response.iter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        limit_mb = max_bytes // (1024 * 1024)
+                        raise ValueError(
+                            f"下载内容超过大小限制（最大 {limit_mb} MB）: {final_url}"
+                        )
+                    chunks.append(chunk)
+
+                return b"".join(chunks), content_type, final_url
+
+    # loop 正常只会从 return 退出；保留兜底让类型检查器知道不会落空。
+    raise ValueError(f"重定向次数超过限制: {url}")
 
 
 def _strip_html(html: str) -> str:
@@ -646,7 +668,9 @@ def install_skill(url: str, skill_name: str = "") -> str:
         )
 
         # 安装依赖（在沙箱内执行 pip install -r requirements.txt）
-        _install_dependencies_in_sandbox(sandbox, sandbox_verify_dir, skill_name)
+        dependency_status = _install_dependencies_in_sandbox(
+            sandbox, sandbox_verify_dir, skill_name
+        )
 
         # 清理沙箱临时文件（释放临时空间）
         sandbox.execute(f"rm -rf {sandbox_tmp}")
@@ -665,15 +689,27 @@ def install_skill(url: str, skill_name: str = "") -> str:
             if persisted_count
             else ""
         )
+        dependency_hint = {
+            "skipped": "依赖: 无 requirements.txt，跳过安装\n",
+            "installed": "依赖: 已安装到 /opt/pydeps\n",
+        }.get(
+            dependency_status,
+            (
+                f"⚠️ 依赖安装失败: {dependency_status.removeprefix('failed: ')}\n"
+                "Skill 文件已保留，但缺少依赖，运行前需要修复。\n"
+                "注意：沙箱默认 `network_mode=none`，需要联网安装的依赖应由镜像预热。\n"
+            ),
+        )
         return (
-            f"✅ Skill 安装成功！（沙箱安全验证通过）\n"
+            f"✅ Skill 文件安装成功（沙箱安全验证通过）\n"
             f"名称: {skill_name}\n"
             f"路径: /skills/custom/{skill_name}（当前用户沙箱）\n"
             f"文件数: {len(installed)}\n"
             f"{persisted_hint}"
+            f"{dependency_hint}"
             f"文件列表:\n{file_listing}{truncated_hint}\n"
             f"来源: {url}\n\n"
-            "该 Skill 已通过沙箱安全验证，现已安装到正式环境。"
+            "该 Skill 已通过沙箱安全验证，文件已安装到当前用户环境。"
         )
 
     except _HttpStatusError as e:
@@ -756,12 +792,19 @@ def _is_archive(url: str, content_type: str) -> bool:
     return False
 
 
-def _install_dependencies_in_sandbox(sandbox, sandbox_skill_dir: str, skill_name: str) -> None:
-    """安装 Skill 的 Python 依赖到沙箱可执行依赖目录。"""
+def _install_dependencies_in_sandbox(
+    sandbox, sandbox_skill_dir: str, skill_name: str
+) -> str:
+    """安装 Skill 的 Python 依赖到沙箱可执行依赖目录。
+
+    Returns:
+        ``skipped`` / ``installed`` / ``failed: <reason>``。调用方必须把失败
+        状态返回给用户，不能把“文件已装、依赖缺失”静默报告成完全成功。
+    """
     req_path = f"{sandbox_skill_dir}/requirements.txt"
     try:
         if not sandbox.file_exists(req_path):
-            return
+            return "skipped"
         req_content = sandbox.read_file_bytes(req_path).decode("utf-8")
         sandbox_req = f"/tmp/requirements_{skill_name}.txt"
         sandbox.write_file(sandbox_req, req_content)
@@ -775,10 +818,13 @@ def _install_dependencies_in_sandbox(sandbox, sandbox_skill_dir: str, skill_name
         sandbox.execute(f"rm -f {sandbox_req}")
         if result.exit_code == 0:
             agent_logger.info(f"Skill dependencies installed in sandbox: {skill_name}")
-        else:
-            agent_logger.warning(
-                f"Sandbox dependency install failed for {skill_name}: "
-                f"{result.output[:200]}"
-            )
+            return "installed"
+        output = (result.output or "").strip().replace("\n", " ")
+        reason = output[:300] or f"pip exited with {result.exit_code}"
+        agent_logger.warning(
+            f"Sandbox dependency install failed for {skill_name}: {reason}"
+        )
+        return f"failed: {reason}"
     except Exception as e:
         agent_logger.warning(f"Sandbox dependency install error: {e}")
+        return f"failed: {str(e)[:300]}"
